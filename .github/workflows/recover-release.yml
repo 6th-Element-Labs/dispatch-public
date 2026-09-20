@@ -1,0 +1,107 @@
+name: recover-release-draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing signed release tag
+        required: true
+        type: string
+      source_run_id:
+        description: Failed release run with successful signed build jobs
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: recover-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release-recovery
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.tag }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Verify the tag and completed signed build jobs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 6th-Element-Labs/dispatch-public
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          TAG_SHA="$(git rev-list -n 1 "refs/tags/$TAG")"
+          test -n "$TAG_SHA"
+          RUN="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID")"
+          test "$(jq -r '.event' <<< "$RUN")" = push
+          test "$(jq -r '.name' <<< "$RUN")" = release
+          test "$(jq -r '.head_sha' <<< "$RUN")" = "$TAG_SHA"
+          JOBS="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100")"
+          for JOB in 'verify release source' 'signed arm64' 'signed x86_64'; do
+            jq -e --arg name "$JOB" '.jobs | any(.name == $name and .conclusion == "success")' <<< "$JOBS" >/dev/null
+          done
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; draft assets are immutable." >&2
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          pattern: macos-*
+          path: release
+          merge-multiple: true
+
+      - name: Verify assets and create the two-platform update feed
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          for ARCH in arm64 x86_64; do
+            test -s "release/Dispatch_${VERSION}_${ARCH}.dmg"
+            test -s "release/Dispatch_${VERSION}_${ARCH}.app.tar.gz"
+            test -s "release/Dispatch_${VERSION}_${ARCH}.app.tar.gz.sig"
+          done
+          test "$(find release -maxdepth 1 -type f | wc -l | tr -d ' ')" = 6
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          node apps/desktop/scripts/validate-updater-manifest.mjs --write \
+            --output "$RUNNER_TEMP/latest.json" \
+            --version "$VERSION" \
+            --url "$BASE/Dispatch_${VERSION}_arm64.app.tar.gz" \
+            --sig "release/Dispatch_${VERSION}_arm64.app.tar.gz.sig" \
+            --url-intel "$BASE/Dispatch_${VERSION}_x86_64.app.tar.gz" \
+            --sig-intel "release/Dispatch_${VERSION}_x86_64.app.tar.gz.sig" \
+            --notes "Signed Apple Silicon and Intel release for macOS 14 or later."
+          npm --prefix apps/desktop run release:verify-updater -- \
+            --manifest "$RUNNER_TEMP/latest.json" \
+            --assets "$(pwd)/release" \
+            --version "$VERSION"
+          node apps/desktop/scripts/write-sha256sums.mjs \
+            --output "$RUNNER_TEMP/SHA256SUMS.txt" release/* "$RUNNER_TEMP/latest.json"
+
+      - name: Create draft from verified assets
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            release/* \
+            "$RUNNER_TEMP/latest.json" \
+            "$RUNNER_TEMP/SHA256SUMS.txt" \
+            --verify-tag \
+            --draft \
+            --title "Dispatch $TAG" \
+            --notes "Signed Apple Silicon and Intel release for macOS 14 or later. Recovered from verified release workflow run $SOURCE_RUN_ID."

@@ -68,4 +68,25 @@ describe('public release workflow', () => {
       assert.match(runbook, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     }
   })
+
+  it('recovers only successful signed jobs under the original tag', async () => {
+    const recovery = await readPublicFile(
+      'deploy/public/.github/workflows/recover-release.yml',
+      '.github/workflows/recover-release.yml',
+    )
+    for (const required of [
+      'workflow_dispatch:',
+      'environment: release-recovery',
+      'SOURCE_RUN_ID',
+      '.head_sha',
+      'signed arm64',
+      'signed x86_64',
+      'actions/download-artifact@v4',
+      'release:verify-updater',
+      '--verify-tag',
+      '--draft',
+    ]) {
+      assert.ok(recovery.includes(required), `missing recovery gate: ${required}`)
+    }
+  })
 })

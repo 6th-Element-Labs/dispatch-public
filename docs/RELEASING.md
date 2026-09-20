@@ -87,3 +87,10 @@ Never replace a DMG, updater archive, signature, checksum file, or
 If a published release is faulty, create a new patch release. If signing,
 notarization, stapling, or updater verification fails, leave the release as a
 draft and repair the workflow before creating the next release tag.
+
+If both signed build jobs pass but the draft assembly job fails, repair the
+assembly code on public `main`. Run `recover-release-draft` with the original
+tag and release workflow run ID. Its protected recovery job checks that the
+tag points to that run's source SHA and that both signed build jobs passed. It
+then verifies the original artifacts and creates a draft without rebuilding or
+moving the tag.
