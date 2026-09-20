@@ -34,7 +34,7 @@ async function main() {
     throw new Error('Use --output SHA256SUMS.txt followed by one or more artifacts')
   }
   const output = resolve(outputArgument)
-  const content = formatChecksums(await checksums(artifacts.map(resolve)))
+  const content = formatChecksums(await checksums(artifacts.map(path => resolve(path))))
   try {
     const existing = await readFile(output, 'utf8')
     if (existing === content) {
