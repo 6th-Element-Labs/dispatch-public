@@ -5,21 +5,24 @@ Codex in one window.
 
 ![Dispatch with synthetic mail](docs/assets/dispatch-screenshot.png)
 
-## Download for Mac
+## Quick start
 
-Download the latest signed DMG from
-[GitHub Releases](https://github.com/6th-Element-Labs/dispatch-public/releases/latest).
-Choose `arm64` for Apple Silicon or `x86_64` for an Intel Mac.
+1. Download the latest signed DMG from
+   [GitHub Releases](https://github.com/6th-Element-Labs/dispatch-public/releases/latest).
+   Choose `arm64` for Apple Silicon or `x86_64` for an Intel Mac.
+2. Open the DMG, drag **Dispatch.app** to **Applications**, eject the DMG,
+   and launch Dispatch from **Applications**.
+3. Sign in to either the [Codex CLI](https://developers.openai.com/codex/cli)
+   (`codex login`) or the current ChatGPT desktop app. If you already use one
+   of them, keep that sign-in.
+4. In Codex, open `codex://plugins/gmail@openai-curated` or use `/plugins`,
+   then connect Gmail. Return to Dispatch to see your connected mail.
 
-Requirements: macOS 14 or later, and an installed Codex CLI or
-current ChatGPT desktop app.
+Requires macOS 14 or later. Dispatch bundles its own Node runtime, but uses
+your installed Codex CLI or current ChatGPT desktop app for Codex and Gmail.
 
-## First run
-
-1. Install Codex from <https://developers.openai.com/codex/cli>.
-2. Sign in with `codex login`, or sign in in ChatGPT desktop.
-3. Open `codex://plugins/gmail@openai-curated`, or use `/plugins` in Codex, and
-   connect Gmail.
+Dispatch checks for updates after launch. You can also choose **Dispatch >
+Check for Updates…**. See [how updates work](docs/UPDATES.md).
 
 Dispatch has no telemetry. Gmail credentials remain with Codex. Dispatch stores
 indexed mail under `~/Library/Application Support/Dispatch`, attachments under
@@ -66,7 +69,8 @@ rm -f "$HOME/Library/LaunchAgents/com.taikun.dispatch.mail.plist" \
 
 ## Feedback
 
-Public issues are welcome. Pull requests are not accepted because this
+Report problems with a [public issue](https://github.com/6th-Element-Labs/dispatch-public/issues/new/choose).
+Pull requests are not accepted because this
 repository contains release snapshots from a separate development history.
 
 Licensed under Apache License 2.0.
