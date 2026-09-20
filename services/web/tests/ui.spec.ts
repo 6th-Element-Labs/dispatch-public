@@ -2041,8 +2041,9 @@ test('Mark as Unread from the row does not wait for a slow message body', async 
   await expect(row.locator('strong')).toHaveCSS('font-weight', '700')
 })
 
-test('keeps an explicitly unread thread unread across navigation and reload', async ({ page }) => {
+test('marks an explicitly unread thread read after reselecting it for 5 seconds', async ({ page }) => {
   await page.clock.install()
+  await page.addInitScript(() => localStorage.setItem('dispatch.manually-unread.v1', JSON.stringify(['demo:t1'])))
   await page.unroute('http://127.0.0.1:8411/v1/accounts')
   await page.unroute(/http:\/\/127\.0\.0\.1:8411\/v1\/conversations\?state=(all|read|unread)/)
   await page.route('http://127.0.0.1:8411/v1/accounts', (route) => route.fulfill({ json: { accounts: [{ id: 'link-one', connectorId: 'gmail-app', name: 'Work', email: 'work@example.com' }] } }))
@@ -2067,22 +2068,23 @@ test('keeps an explicitly unread thread unread across navigation and reload', as
   await page.locator('[data-conversation-id="demo:t1"]').click()
   await page.getByRole('button', { name: 'Mark unread' }).click()
   await expect(page.locator('[data-conversation-id="demo:t1"]')).toHaveClass(/dispatch-message-unread/)
-  await page.locator('[data-conversation-id="demo:t2"]').click()
-  await page.locator('[data-conversation-id="demo:t1"]').click()
-  await page.clock.fastForward(6_000)
-  await expect(page.locator('[data-conversation-id="demo:t1"]')).toHaveClass(/dispatch-message-unread/)
-  await expect(page.getByRole('button', { name: 'Mark read' })).toBeVisible()
-  await page.reload()
-  await page.locator('[data-conversation-id="demo:t1"]').click()
   await page.clock.fastForward(6_000)
   await expect(page.locator('[data-conversation-id="demo:t1"]')).toHaveClass(/dispatch-message-unread/)
   expect(writes).toEqual([{ accountId: 'link-one', messageIds: ['m1'], unread: true }])
-  await page.getByRole('button', { name: 'Mark read' }).click()
+  await page.locator('[data-conversation-id="demo:t2"]').click()
+  await page.locator('[data-conversation-id="demo:t1"]').click()
+  await page.clock.fastForward(4_999)
+  await expect(page.locator('[data-conversation-id="demo:t1"]')).toHaveClass(/dispatch-message-unread/)
+  expect(writes).toHaveLength(1)
+  await page.clock.fastForward(1)
   await expect(page.locator('[data-conversation-id="demo:t1"]')).not.toHaveClass(/dispatch-message-unread/)
+  await expect(page.getByRole('button', { name: 'Mark unread' })).toBeVisible()
   expect(writes).toEqual([
     { accountId: 'link-one', messageIds: ['m1'], unread: true },
     { accountId: 'link-one', messageIds: ['m1'], unread: false },
   ])
+  await page.reload()
+  await expect(page.locator('[data-conversation-id="demo:t1"]')).not.toHaveClass(/dispatch-message-unread/)
 })
 
 test('moves a newly marked unread thread out of the Read filter', async ({ page }) => {

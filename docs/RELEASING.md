@@ -60,8 +60,8 @@ Download both draft DMGs and `SHA256SUMS.txt`. Verify the checksum of each DMG, 
 
 ```bash
 shasum -a 256 -c SHA256SUMS.txt
-xcrun stapler validate Dispatch_0.1.4_arm64.dmg
-spctl --assess --type open --context context:primary-signature Dispatch_0.1.4_arm64.dmg
+xcrun stapler validate Dispatch_0.1.5_arm64.dmg
+spctl --assess --type open --context context:primary-signature Dispatch_0.1.5_arm64.dmg
 codesign --verify --deep --strict /Volumes/Dispatch/Dispatch.app
 spctl --assess --type execute /Volumes/Dispatch/Dispatch.app
 xcrun stapler validate /Volumes/Dispatch/Dispatch.app

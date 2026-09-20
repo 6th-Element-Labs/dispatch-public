@@ -429,21 +429,7 @@ let selection: SelectionState = EMPTY_SELECTION
 let readerNeedsRetry = false
 let selectionSequence = 0
 const markReadDwell = createMarkReadDwell()
-const MANUALLY_UNREAD_KEY = 'dispatch.manually-unread.v1'
-const manuallyUnreadConversationIds = (() => {
-  try {
-    const saved: unknown = JSON.parse(localStorage.getItem(MANUALLY_UNREAD_KEY) ?? '[]')
-    return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : [])
-  } catch { return new Set<string>() }
-})()
-function rememberManualUnread(conversationId: string, unread: boolean): boolean {
-  if (unread) manuallyUnreadConversationIds.add(conversationId)
-  else manuallyUnreadConversationIds.delete(conversationId)
-  try {
-    localStorage.setItem(MANUALLY_UNREAD_KEY, JSON.stringify([...manuallyUnreadConversationIds]))
-    return true
-  } catch { return false }
-}
+let readStateActionSequence = 0
 let conversationLoadSequence = 0
 const conversationCache = new Map<string, Promise<ConversationProjection>>()
 const BINDING_CACHE = 'dispatch.codex.bindings.v1'
@@ -1136,7 +1122,7 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
   elements.body.replaceChildren(loading)
   elements.attachments.replaceChildren()
   elements.threadFilesToggle.hidden = true
-  if (!offlineMode && options.startReadDwell && summary.unread && summary.accountId && !manuallyUnreadConversationIds.has(id)) {
+  if (!offlineMode && options.startReadDwell && summary.unread && summary.accountId) {
     const conversationId = summary.id
     markReadDwell.schedule(conversationId, () => { void completeReadDwell(conversationId) })
   }
@@ -1273,13 +1259,14 @@ if (!offlineMode && !String(error).includes('not_downloaded')) window.setTimeout
 }
 
 async function completeReadDwell(conversationId: string): Promise<void> {
-  if (selectedConversationId !== conversationId || manuallyUnreadConversationIds.has(conversationId)) return
+  if (selectedConversationId !== conversationId) return
   const summary = conversations.find((conversation) => conversation.id === conversationId)
   if (!summary?.accountId || !summary.unread) return
+  const actionSequence = readStateActionSequence
   const messageIds = selectedConversationId === conversationId && selected ? selected.messages.map((message) => message.id) : []
   try {
     await api.setConversationUnread(summary.threadId, summary.accountId, false, messageIds)
-    if (selectedConversationId !== conversationId || manuallyUnreadConversationIds.has(conversationId)) return
+    if (selectedConversationId !== conversationId || actionSequence !== readStateActionSequence) return
     applyLocalReadState(conversationId, false)
   } catch (error) {
     if (selectedConversationId !== conversationId) return
@@ -1336,18 +1323,15 @@ function renderReadState(unread: boolean, busy = false): void {
 
 async function applyReadState(nextUnread: boolean, target: ConversationSummary | undefined = selected): Promise<void> {
   if (!target?.accountId) return
+  markReadDwell.cancel()
+  readStateActionSequence += 1
   const conversationId = target.id
   const messageIds = selected?.id === conversationId ? selected.messages.map(message => message.id) : []
   elements.readState.disabled = true
   renderReadState(!nextUnread, true)
   try {
     await api.setConversationUnread(target.threadId, target.accountId, nextUnread, messageIds)
-    const remembered = rememberManualUnread(conversationId, nextUnread)
     applyLocalReadState(conversationId, nextUnread)
-    if (!remembered) {
-      elements.mailError.hidden = false
-      elements.mailError.textContent = 'Gmail accepted the read change, but this Mac could not remember it across restarts.'
-    }
   } catch (error) {
     if (selectedConversationId === conversationId) renderReadState(selected?.unread ?? target.unread)
     elements.mailError.hidden = false
