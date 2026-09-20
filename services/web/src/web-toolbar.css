@@ -1,0 +1,12 @@
+:root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 13px; color: light-dark(#242629,#f0f1f3); background: light-dark(#f5f6f8,#24272c); }
+* { box-sizing: border-box; }
+html,body { margin: 0; }
+header { display: flex; align-items: center; gap: 6px; padding: 8px 12px 4px; height: 48px; }
+button { flex-shrink: 0; display: inline-flex; gap: 6px; align-items: center; justify-content: center; min-width: 34px; min-height: 32px; padding: 6px 10px; border: 1px solid light-dark(#dfe1e5,#4e5157); border-radius: 6px; background: light-dark(#fff,#30333a); color: inherit; font: inherit; cursor: pointer; }
+button:hover { background: light-dark(#e6eef8,#384756); }
+button:disabled { opacity: .4; cursor: default; }
+button i { font-size: 17px; }
+.web-return { background: light-dark(#066fd1,#367fc6); color: white; border-color: transparent; }
+.web-return:hover { background: light-dark(#055db1,#286bb0); }
+.web-address { min-width: 0; flex: 1; padding: 0 8px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.web-status { height: 32px; padding: 2px 14px 8px; font-size: 12px; color: light-dark(#60656d,#b5bac3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid light-dark(#dfe1e5,#4e5157); }

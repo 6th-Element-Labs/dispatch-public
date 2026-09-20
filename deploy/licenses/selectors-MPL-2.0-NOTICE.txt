@@ -1,0 +1,6 @@
+selectors 0.36.1
+Copyright The Servo Project Developers
+
+This package is licensed under the Mozilla Public License Version 2.0.
+Dispatch's THIRD_PARTY_NOTICES.md includes the complete MPL-2.0 text supplied
+with the cssparser package from the same Servo dependency family.

@@ -1,0 +1,30 @@
+[package]
+name = "dispatch"
+version = "0.1.0"
+description = "Dispatch macOS shell: native window plus supervised service sidecars"
+edition = "2021"
+rust-version = "1.77"
+publish = false
+
+# Composition only. Mail, agent, and presentation logic live in services/.
+
+[lib]
+name = "dispatch_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["unstable"] }
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"

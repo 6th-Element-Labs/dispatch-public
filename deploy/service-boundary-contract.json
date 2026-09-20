@@ -1,0 +1,39 @@
+{
+  "schema": "dispatch.service_boundary_contract.v1",
+  "services": [
+    {
+      "name": "web",
+      "port": 8410,
+      "store": null,
+      "owns": ["static-client", "presentation-state", "unsaved-editor-recovery"]
+    },
+    {
+      "name": "mail",
+      "port": 8411,
+      "store": "gmail-index-sqlite",
+      "owns": ["gmail-sync-state", "gmail-message-index", "message-projections", "draft-state", "attachment-open-cache", "downloaded-conversations", "send-receipts", "mailbox-download-state"]
+    },
+    {
+      "name": "agent",
+      "port": 8412,
+      "store": "codex-owned-session-store",
+      "owns": ["app-server-process", "agent-transport", "streamed-agent-events"]
+    }
+  ],
+  "requirements": {
+    "localhost_only": true,
+    "health_path": "/health",
+    "readiness_path": "/ready",
+    "independent_processes": true,
+    "one_writer_per_mutable_record": true,
+    "cross_service_database_reads": false,
+    "typed_contracts": true,
+    "thin_client": true,
+    "no_root_monolith": true,
+    "codex_app_server_is_agent_harness": true,
+    "email_content_is_untrusted": true,
+    "fail_early_on_missing_or_invalid_data": true,
+    "silent_fallbacks_forbidden": true,
+    "cross_service_requests_have_deadlines": true
+  }
+}

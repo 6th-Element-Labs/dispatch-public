@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-set-appearance"
+description = "The main window reports its appearance preference so the View menu and window theme mirror it."
+commands.allow = ["set_appearance"]

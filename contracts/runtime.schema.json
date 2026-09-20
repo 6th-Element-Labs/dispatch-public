@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dispatch runtime activity",
+  "description": "GET /v1/runtime. Control POST requests require X-Dispatch-Runtime matching the health runtimeId. POST /v1/runtime/drain returns draining=true only when no work is active and blocks new mutations. POST /v1/runtime/resume releases an aborted drain.",
+  "type": "object",
+  "required": ["service", "activeOperations", "draining"],
+  "properties": {
+    "service": { "enum": ["dispatch-mail", "dispatch-agent"] },
+    "runtimeId": { "type": ["string", "null"] },
+    "activeOperations": { "type": "integer", "minimum": 0 },
+    "draining": { "type": "boolean" }
+  }
+}

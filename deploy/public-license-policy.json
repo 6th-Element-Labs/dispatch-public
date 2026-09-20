@@ -1,0 +1,162 @@
+{
+  "schema": "dispatch.license_policy.v1",
+  "approved": [
+    "(Apache-2.0 OR MIT) AND BSD-3-Clause",
+    "(MIT AND Zlib)",
+    "(MIT OR Apache-2.0) AND Unicode-3.0",
+    "(MPL-2.0 OR Apache-2.0)",
+    "0BSD OR Apache-2.0 OR MIT",
+    "Apache-2.0",
+    "Apache-2.0 AND MIT",
+    "Apache-2.0 OR BSD-3-Clause OR MIT",
+    "Apache-2.0 OR CC0-1.0 OR MIT-0",
+    "Apache-2.0 OR LGPL-2.1-or-later OR MIT",
+    "Apache-2.0 OR MIT",
+    "Apache-2.0 OR MIT OR Zlib",
+    "Apache-2.0 WITH LLVM-exception",
+    "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSD-3-Clause AND MIT",
+    "BSD-3-Clause OR MIT",
+    "BlueOak-1.0.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT OR Unlicense",
+    "MIT-0",
+    "MPL-2.0",
+    "Node.js",
+    "Python-2.0",
+    "Unicode-3.0",
+    "Zlib"
+  ],
+  "overrides": {
+    "npm:@tabler/icons-webfont@3.46.0": {
+      "license": "MIT",
+      "evidence": "Package description and https://github.com/tabler/tabler-icons/blob/main/LICENSE",
+      "licenseFile": "deploy/licenses/tabler-icons-MIT.txt"
+    },
+    "npm:@tabler/core@1.4.0": {
+      "license": "MIT",
+      "evidence": "https://github.com/tabler/tabler/blob/dev/LICENSE",
+      "licenseFile": "deploy/licenses/tabler-core-MIT.txt"
+    },
+    "npm:saxes@6.0.0": {
+      "license": "ISC",
+      "evidence": "https://github.com/lddubeau/saxes/blob/master/LICENSE",
+      "licenseFile": "deploy/licenses/saxes-ISC.txt"
+    },
+    "cargo:alloc-stdlib@0.2.4": {
+      "license": "BSD-3-Clause",
+      "evidence": "https://github.com/dropbox/rust-alloc-no-stdlib/blob/master/LICENSE",
+      "licenseFile": "deploy/licenses/rust-alloc-no-stdlib-BSD-3-Clause.txt"
+    },
+    "cargo:defmt-parser@1.0.0": {
+      "license": "Apache-2.0 OR MIT",
+      "evidence": "https://github.com/knurling-rs/defmt",
+      "licenseFile": "deploy/licenses/defmt-NOTICE.txt"
+    },
+    "cargo:block2@0.6.2": {
+      "license": "MIT",
+      "evidence": "https://github.com/madsmtm/objc2/blob/main/LICENSE.md",
+      "licenseFile": "deploy/licenses/objc2-NOTICE.txt"
+    },
+    "cargo:dispatch2@0.3.1": {
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "evidence": "https://github.com/madsmtm/objc2/blob/main/LICENSE.md",
+      "licenseFile": "deploy/licenses/objc2-NOTICE.txt"
+    },
+    "cargo:objc2@0.6.4": {
+      "license": "MIT",
+      "evidence": "https://github.com/madsmtm/objc2/blob/main/LICENSE.md",
+      "licenseFile": "deploy/licenses/objc2-NOTICE.txt"
+    },
+    "cargo:objc2-app-kit@0.3.2": {
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "evidence": "https://github.com/madsmtm/objc2/blob/main/LICENSE.md",
+      "licenseFile": "deploy/licenses/objc2-NOTICE.txt"
+    },
+    "cargo:objc2-core-foundation@0.3.2": {
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "evidence": "https://github.com/madsmtm/objc2/blob/main/LICENSE.md",
+      "licenseFile": "deploy/licenses/objc2-NOTICE.txt"
+    },
+    "cargo:objc2-core-graphics@0.3.2": {
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "evidence": "https://github.com/madsmtm/objc2/blob/main/LICENSE.md",
+      "licenseFile": "deploy/licenses/objc2-NOTICE.txt"
+    },
+    "cargo:objc2-encode@4.1.0": {
+      "license": "MIT",
+      "evidence": "https://github.com/madsmtm/objc2/blob/main/LICENSE.md",
+      "licenseFile": "deploy/licenses/objc2-NOTICE.txt"
+    },
+    "cargo:objc2-exception-helper@0.1.1": {
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "evidence": "https://github.com/madsmtm/objc2/blob/main/LICENSE.md",
+      "licenseFile": "deploy/licenses/objc2-NOTICE.txt"
+    },
+    "cargo:objc2-foundation@0.3.2": {
+      "license": "MIT",
+      "evidence": "https://github.com/madsmtm/objc2/blob/main/LICENSE.md",
+      "licenseFile": "deploy/licenses/objc2-NOTICE.txt"
+    },
+    "cargo:objc2-io-surface@0.3.2": {
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "evidence": "https://github.com/madsmtm/objc2/blob/main/LICENSE.md",
+      "licenseFile": "deploy/licenses/objc2-NOTICE.txt"
+    },
+    "cargo:objc2-web-kit@0.3.2": {
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "evidence": "https://github.com/madsmtm/objc2/blob/main/LICENSE.md",
+      "licenseFile": "deploy/licenses/objc2-NOTICE.txt"
+    },
+    "cargo:selectors@0.36.1": {
+      "license": "MPL-2.0",
+      "evidence": "https://github.com/servo/stylo/tree/main/selectors",
+      "licenseFile": "deploy/licenses/selectors-MPL-2.0-NOTICE.txt"
+    },
+    "cargo:sigchld@0.2.5": {
+      "license": "MIT",
+      "evidence": "https://github.com/oconnor663/sigchld.rs",
+      "licenseFile": "deploy/licenses/sigchld-MIT.txt"
+    },
+    "cargo:unic-char-property@0.9.0": {
+      "license": "Apache-2.0 OR MIT",
+      "evidence": "https://github.com/open-i18n/rust-unic/blob/master/COPYRIGHT.md",
+      "licenseFile": "deploy/licenses/rust-unic-NOTICE.txt"
+    },
+    "cargo:unic-char-range@0.9.0": {
+      "license": "Apache-2.0 OR MIT",
+      "evidence": "https://github.com/open-i18n/rust-unic/blob/master/COPYRIGHT.md",
+      "licenseFile": "deploy/licenses/rust-unic-NOTICE.txt"
+    },
+    "cargo:unic-common@0.9.0": {
+      "license": "Apache-2.0 OR MIT",
+      "evidence": "https://github.com/open-i18n/rust-unic/blob/master/COPYRIGHT.md",
+      "licenseFile": "deploy/licenses/rust-unic-NOTICE.txt"
+    },
+    "cargo:unic-ucd-ident@0.9.0": {
+      "license": "Apache-2.0 OR MIT",
+      "evidence": "https://github.com/open-i18n/rust-unic/blob/master/COPYRIGHT.md",
+      "licenseFile": "deploy/licenses/rust-unic-NOTICE.txt"
+    },
+    "cargo:unic-ucd-version@0.9.0": {
+      "license": "Apache-2.0 OR MIT",
+      "evidence": "https://github.com/open-i18n/rust-unic/blob/master/COPYRIGHT.md",
+      "licenseFile": "deploy/licenses/rust-unic-NOTICE.txt"
+    }
+  },
+  "runtimes": [
+    {
+      "name": "Node.js",
+      "version": "22.23.2",
+      "license": "Node.js",
+      "authors": ["Node.js contributors"],
+      "source": "https://github.com/nodejs/node/tree/v22.23.2",
+      "licenseUrl": "https://raw.githubusercontent.com/nodejs/node/v22.23.2/LICENSE",
+      "licenseSha256": "c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4"
+    }
+  ]
+}

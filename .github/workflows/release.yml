@@ -1,0 +1,196 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: public-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Verify tag and source version
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          test "$GITHUB_REF_NAME" = "v$VERSION"
+          node scripts/version-contract.mjs --expect "$VERSION"
+
+      - name: Install Chromium
+        run: |
+          npm --prefix services/web ci --prefer-offline --no-audit --no-fund
+          npm --prefix services/web exec -- playwright install --with-deps chromium
+
+      - name: Run the public gate
+        run: bash scripts/public_ci.sh
+
+  macos-release:
+    name: signed Apple Silicon draft
+    needs: verify
+    runs-on: macos-14
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: write
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/src-tauri/target
+          key: release-macos-cargo-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: release-macos-cargo-
+
+      - name: Install workspace dependencies
+        run: |
+          set -euo pipefail
+          for dir in services/web services/mail services/agent apps/desktop; do
+            npm --prefix "$dir" ci --prefer-offline --no-audit --no-fund
+          done
+
+      - name: Fetch the pinned Node sidecar
+        run: npm --prefix apps/desktop run fetch-node
+
+      - name: Import the Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/DeveloperID.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/build.keychain"
+          security default-keychain -s "$RUNNER_TEMP/build.keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/build.keychain"
+          security set-keychain-settings -t 3600 -u "$RUNNER_TEMP/build.keychain"
+          security import "$RUNNER_TEMP/DeveloperID.p12" \
+            -k "$RUNNER_TEMP/build.keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" \
+            "$RUNNER_TEMP/build.keychain"
+          security find-identity -v -p codesigning "$RUNNER_TEMP/build.keychain" \
+            | grep -F "$APPLE_SIGNING_IDENTITY"
+
+      - name: Prepare the notarization key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_API_KEY_P8"
+          printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+
+      - name: Build signed and notarized artifacts
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          rm -rf apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle
+          npm --prefix apps/desktop run build:native -- \
+            --target aarch64-apple-darwin \
+            --bundles app,dmg
+
+      - name: Verify the signed release
+        run: |
+          set -euo pipefail
+          APP="apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Dispatch.app"
+          DMG="$(find apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)"
+          test -n "$DMG"
+          npm --prefix apps/desktop run release:verify -- \
+            --app "${APP#apps/desktop/}" \
+            --dmg "${DMG#apps/desktop/}"
+
+      - name: Create checksums and draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUNDLE="apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle"
+          DMG="$(find "$BUNDLE/dmg" -name '*.dmg' -print -quit)"
+          ARCHIVE="$(find "$BUNDLE" -name '*.app.tar.gz' -print -quit)"
+          test -n "$DMG"
+          test -n "$ARCHIVE"
+          test -f "${ARCHIVE}.sig"
+          ARCHIVE_NAME="$(basename "$ARCHIVE")"
+          ASSET_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${ARCHIVE_NAME}"
+          node apps/desktop/scripts/validate-updater-manifest.mjs --write \
+            --output "$RUNNER_TEMP/latest.json" \
+            --version "$VERSION" \
+            --url "$ASSET_URL" \
+            --sig "${ARCHIVE}.sig" \
+            --notes "Signed Apple Silicon release for macOS 14 or later."
+          npm --prefix apps/desktop run release:verify-updater -- \
+            --manifest "$RUNNER_TEMP/latest.json" \
+            --assets "$(dirname "$ARCHIVE")" \
+            --version "$VERSION"
+          RELATIVE_DMG="${DMG#apps/desktop/}"
+          RELATIVE_ARCHIVE="${ARCHIVE#apps/desktop/}"
+          npm --prefix apps/desktop run release:checksums -- \
+            --output "$RUNNER_TEMP/SHA256SUMS.txt" \
+            "$RELATIVE_DMG" \
+            "$RELATIVE_ARCHIVE" \
+            "${RELATIVE_ARCHIVE}.sig"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; assets are immutable." >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            "$DMG" \
+            "$ARCHIVE" \
+            "${ARCHIVE}.sig" \
+            "$RUNNER_TEMP/latest.json" \
+            "$RUNNER_TEMP/SHA256SUMS.txt" \
+            --verify-tag \
+            --draft \
+            --title "Dispatch $GITHUB_REF_NAME" \
+            --notes "Signed Apple Silicon release for macOS 14 or later."
+
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/DeveloperID.p12" "$RUNNER_TEMP/AuthKey.p8"

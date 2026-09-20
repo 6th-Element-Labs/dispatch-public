@@ -1,0 +1,66 @@
+name: native
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-shell:
+    name: public-ci/macos-shell
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/src-tauri/target
+          key: public-macos-cargo-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: public-macos-cargo-
+
+      - name: Install workspace dependencies
+        run: |
+          set -euo pipefail
+          for dir in services/web services/mail services/agent apps/desktop; do
+            npm --prefix "$dir" ci --prefer-offline --no-audit --no-fund
+          done
+
+      - name: Fetch the pinned Node sidecar
+        run: npm --prefix apps/desktop run fetch-node
+
+      - name: Stage the web client and services
+        run: npm --prefix apps/desktop run stage
+
+      - name: Rust unit tests
+        run: npm --prefix apps/desktop run test:native
+
+      - name: Build Dispatch.app
+        run: npm --prefix apps/desktop run build:native -- --bundles app
+
+      - name: Verify macOS deployment target
+        run: |
+          value="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' \
+            apps/desktop/src-tauri/target/release/bundle/macos/Dispatch.app/Contents/Info.plist)"
+          test "$value" = "14.0"
+
+      - name: Start the bundled services with the bundled Node
+        run: npm --prefix apps/desktop run smoke

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Dispatch",
+  "version": "0.1.0",
+  "identifier": "com.taikun.dispatch",
+  "build": {
+    "devUrl": "http://127.0.0.1:8410",
+    "frontendDist": "../../../services/web/dist",
+    "beforeDevCommand": "node scripts/stage.mjs --services-only && npm --prefix ../../services/web run dev",
+    "beforeBuildCommand": "node scripts/stage.mjs"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Dispatch",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 20
+        },
+        "create": false,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' http://127.0.0.1:8411 http://127.0.0.1:8412 ipc: http://ipc.localhost; img-src 'self' data: blob: https: http://127.0.0.1:8411; frame-src http://127.0.0.1:8411; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Gmail and Codex in one focused workspace",
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/node"
+    ],
+    "resources": {
+      "resources/services/": "services/",
+      "resources/legal/": "legal/"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxOTI3NjdCMUZENEY2RTEKUldUaDl0UWZlM2FTMFZIckpWTzhvMHRTUGc5dUxDNE9ST09LbkNsSDU2M3ZIRjZyc2RIY1c0bFcK",
+      "endpoints": [
+        "https://github.com/6th-Element-Labs/dispatch-public/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

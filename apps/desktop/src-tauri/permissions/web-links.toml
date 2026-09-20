@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-open-web-link"
+description = "Let the local mail UI open a web link without navigating its own view."
+commands.allow = ["open_web_link"]
+
+[[permission]]
+identifier = "allow-web-link-controls"
+description = "Let the local browser toolbar inspect and control its remote sibling webview."
+commands.allow = ["web_link_state", "web_link_action"]

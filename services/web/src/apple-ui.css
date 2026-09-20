@@ -1,0 +1,53 @@
+/* Local trial: Apple interaction guidance, Dispatch/Tabler controls. */
+:root { --dispatch-ui-meta: 12px; --dispatch-ui-body: 13px; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+.dispatch-toolbar { background: var(--tblr-bg-surface-secondary); }
+.dispatch-rail { background: var(--tblr-bg-surface-secondary); padding: 12px 8px; }
+.dispatch-rail .nav-link { flex-direction: row; min-height: 34px; justify-content: flex-start; gap: 8px; font-size: 13px; padding: 7px 9px; }
+.dispatch-messages { grid-template-rows: auto auto auto minmax(0, 1fr) auto auto; position: relative; background: var(--tblr-bg-surface-secondary); }
+.dispatch-mail-tabs { grid-row: 1; }
+.dispatch-search-status { grid-row: 3; }
+.dispatch-message-list { grid-row: 4; padding: 4px 6px; }
+.dispatch-messages > [data-mail-error] { grid-row: 5; }
+.dispatch-mail-activity { grid-row: 6; padding: 8px 12px; border-top: 1px solid var(--tblr-border-color); }
+.dispatch-mail-activity > button { width: 100%; justify-content: flex-start; color: var(--tblr-secondary-color); }
+.dispatch-activity-popover { position: absolute; bottom: 48px; left: 10px; right: 10px; z-index: 30; background: var(--tblr-bg-surface); border: 1px solid var(--tblr-border-color); border-radius: 8px; box-shadow: 0 6px 20px #0002; padding: 12px; }
+.dispatch-activity-options { display: flex; flex-direction: column; padding: 8px 0; gap: 4px; }
+.dispatch-activity-options button { display: flex; align-items: center; gap: 8px; padding: 7px; color: var(--tblr-body-color); }
+.dispatch-message { border-radius: 6px !important; margin: 2px 0; }
+.dispatch-message.active, .dispatch-message.dispatch-message-unread.active { color: var(--tblr-body-color); background: var(--tblr-primary-lt); }
+.dispatch-message:not(.active) { background: transparent; }
+.dispatch-message-unread .dispatch-message-top strong { color: var(--tblr-body-color); }
+.dispatch-message-account { color: var(--tblr-secondary-color); font-size: 11px; }
+.dispatch-compact .dispatch-message { grid-template-columns: minmax(0,1fr); padding: 10px 12px; gap: 0; }
+.dispatch-compact .dispatch-message > .avatar { display: none; }
+.dispatch-compact .dispatch-message:not(.dispatch-search-match) small { display: none; }
+.dispatch-compact .dispatch-message b { -webkit-line-clamp: 1; font-size: 13px; }
+.dispatch-compact .dispatch-message-unread .dispatch-message-top strong::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--tblr-primary); }
+.dispatch-reader-header { padding: 18px 22px 14px; }
+.dispatch-reader-subject { font-size: 18px; font-weight: 600; }
+.dispatch-thread-meta, .dispatch-copy-status { font-size: 12px; }
+.dispatch-thread-content { font-size: 14px; line-height: 1.75; }
+.dispatch-thread-message { box-shadow: none; }
+.dispatch-chat-bubble { background: var(--tblr-bg-surface-secondary); color: var(--tblr-body-color); border: 1px solid var(--tblr-border-color); box-shadow: none; }
+.dispatch-agent-user .dispatch-chat-bubble { width: 92%; max-width: 92%; }
+.dispatch-agent-message .dispatch-chat-plain { font-size: 13px; }
+.dispatch-agent-agent > .avatar { display: none; }
+.dispatch-agent-state-text { margin: 0 0 8px; font-size: 12px; color: var(--tblr-secondary-color); }
+.dispatch-agent-state-text:not([hidden]) { padding: 6px 8px; background: var(--tblr-yellow-lt); border-radius: 6px; }
+.dispatch-utility-dialog:not(:modal) { position: fixed; inset: auto auto 24px 24px; margin: 0; width: min(480px,calc(100vw - 48px)); z-index: 80; box-shadow: 0 8px 32px #0003; }
+@media (min-width: 821px) { .dispatch-rail:not([hidden]) { display: flex; } }
+@media (max-width: 820px) { .dispatch-utility-dialog:not(:modal) { inset: auto 12px 12px; width: calc(100vw - 24px); } .dispatch-reader-header { padding: 14px; } }
+.dispatch-workspace { position: relative; }
+.dispatch-activity-status { display: flex; align-items: center; min-width: 0; gap: 4px; }
+.dispatch-activity-status .dispatch-sync { flex: 1; }
+.dispatch-activity-status [data-refresh] { flex-shrink: 0; }
+.dispatch-toolbar-reader .dispatch-search { max-width: min(100%, 420px); width: 100%; }
+.dispatch-agent-state-text[data-state="Working"], .dispatch-agent-state-text[data-state="Interrupted"] { background: transparent; }
+
+.dispatch-sidebar-options { padding: 2px; min-width: 20px; }
+.dispatch-sidebar-menu { position: fixed; z-index: 100; width: 180px; }
+.dispatch-sidebar-menu [aria-checked="true"]::after { content: '✓'; margin-left: auto; color: var(--tblr-primary); }
+.dispatch-rail[data-style="compact"] { padding: 10px 4px; }
+.dispatch-rail[data-style="compact"] .nav-link { flex-direction: column; justify-content: center; min-height: 54px; gap: 3px; padding: 7px 2px; font-size: 11px; }
+.dispatch-rail[data-style="compact"] .nav-link i { font-size: 19px; }

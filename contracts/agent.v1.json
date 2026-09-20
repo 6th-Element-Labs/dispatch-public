@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dispatch.agent.v1",
+  "title": "Dispatch agent adapter contract",
+  "type": "object",
+  "properties": {
+    "turn": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "appId": {"type": "string"},
+        "mailContext": {
+          "type": "object",
+          "required": ["messageId", "threadId", "subject", "sender"],
+          "properties": {
+            "messageId": {"type": "string"},
+            "threadId": {"type": "string"},
+            "subject": {"type": "string"},
+            "sender": {"type": "string"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
+

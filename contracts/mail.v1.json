@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dispatch.mail.v1",
+  "title": "Dispatch mail projection contract",
+  "type": "object",
+  "properties": {
+    "message": {
+      "type": "object",
+      "required": ["id", "threadId", "sender", "subject", "receivedAt", "preview", "body"],
+      "properties": {
+        "id": {"type": "string"},
+        "threadId": {"type": "string"},
+        "sender": {"type": "object"},
+        "subject": {"type": "string"},
+        "receivedAt": {"type": "string"},
+        "preview": {"type": "string"},
+        "body": {"type": "object"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}
+

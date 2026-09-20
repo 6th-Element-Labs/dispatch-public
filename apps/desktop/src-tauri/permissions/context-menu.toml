@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-popup-context-menu"
+description = "Allow the webview to open a native context menu from a web-owned item list."
+commands.allow = ["popup_context_menu"]

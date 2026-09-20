@@ -1,0 +1,25 @@
+{
+  "name": "dispatch-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "fetch-node": "node scripts/fetch-node.mjs",
+    "stage": "node scripts/stage.mjs",
+    "icon": "mkdir -p .icon-build && qlmanage -t -s 1024 -o .icon-build src-tauri/icons/icon.svg >/dev/null && tauri icon .icon-build/icon.svg.png && rm -rf src-tauri/icons/android src-tauri/icons/ios src-tauri/icons/Square*.png src-tauri/icons/StoreLogo.png src-tauri/icons/64x64.png",
+    "dev:native": "tauri dev",
+    "build:native": "tauri build",
+    "test:native": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "release:checksums": "node scripts/write-sha256sums.mjs",
+    "release:verify": "node scripts/verify-release.mjs",
+    "release:verify-updater": "node scripts/validate-updater-manifest.mjs",
+    "smoke": "node scripts/smoke-bundle.mjs",
+    "install:app": "node scripts/install-app.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  }
+}

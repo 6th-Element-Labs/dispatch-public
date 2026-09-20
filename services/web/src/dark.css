@@ -1,0 +1,91 @@
+/* Dark appearance: neutral near-black greys and one accent, in place of
+   Tabler's navy-tinted defaults. Every component already reads these
+   tokens, so this file only retunes values. */
+:root[data-bs-theme="dark"] {
+  --tblr-body-bg: #141416;
+  --tblr-body-bg-rgb: 20, 20, 22;
+  --tblr-body-color: #e6e6e9;
+  --tblr-body-color-rgb: 230, 230, 233;
+  --tblr-emphasis-color: #ffffff;
+  --tblr-secondary-color: rgba(230, 230, 233, 0.62);
+  --tblr-secondary-color-rgb: 230, 230, 233;
+  --tblr-tertiary-color: rgba(230, 230, 233, 0.42);
+  --tblr-tertiary-color-rgb: 230, 230, 233;
+  --tblr-muted: rgba(230, 230, 233, 0.55);
+
+  --tblr-bg-surface: #1c1c1f;
+  --tblr-bg-surface-secondary: #161618;
+  --tblr-bg-surface-tertiary: #242427;
+  --tblr-bg-surface-dark: #0f0f11;
+  --tblr-secondary-bg: #242427;
+  --tblr-secondary-bg-rgb: 36, 36, 39;
+  --tblr-tertiary-bg: #1a1a1d;
+  --tblr-tertiary-bg-rgb: 26, 26, 29;
+  --tblr-light-bg-subtle: #1f1f22;
+  --tblr-dark-bg-subtle: #101012;
+
+  --tblr-border-color: rgba(255, 255, 255, 0.08);
+  --tblr-border-color-translucent: rgba(255, 255, 255, 0.06);
+  --tblr-border-color-active: rgba(255, 255, 255, 0.16);
+  --tblr-light-border-subtle: rgba(255, 255, 255, 0.1);
+  --tblr-dark-border-subtle: rgba(255, 255, 255, 0.06);
+
+  --tblr-primary: #0a84ff;
+  --tblr-primary-rgb: 10, 132, 255;
+  --tblr-primary-lt: rgba(10, 132, 255, 0.18);
+  --tblr-primary-text-emphasis: #5eaaff;
+  --tblr-primary-bg-subtle: rgba(10, 132, 255, 0.14);
+  --tblr-primary-border-subtle: rgba(10, 132, 255, 0.35);
+  --tblr-link-color: #409cff;
+  --tblr-link-color-rgb: 64, 156, 255;
+  --tblr-link-hover-color: #6ab0ff;
+  --tblr-link-hover-color-rgb: 106, 176, 255;
+  --tblr-blue: #0a84ff;
+  --tblr-blue-rgb: 10, 132, 255;
+  --tblr-blue-lt: rgba(10, 132, 255, 0.18);
+
+  --tblr-gray-50: #1a1a1d;
+  --tblr-gray-100: #242427;
+  --tblr-gray-200: #2c2c30;
+  --tblr-gray-300: #3a3a3f;
+  --tblr-gray-400: #55555c;
+  --tblr-gray-500: #77777f;
+  --tblr-gray-600: #9a9aa3;
+  --tblr-gray-700: #bcbcc4;
+  --tblr-gray-800: #d6d6dc;
+  --tblr-gray-900: #ececef;
+
+  --tblr-success-lt: rgba(48, 209, 88, 0.16);
+  --tblr-warning-lt: rgba(255, 214, 10, 0.14);
+  --tblr-warning: #ffd60a;
+  --tblr-danger-lt: rgba(255, 69, 58, 0.16);
+  --tblr-green: #30d158;
+  --tblr-yellow: #ffd60a;
+  --tblr-red: #ff453a;
+
+  --tblr-box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --tblr-box-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --tblr-box-shadow-dropdown: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --tblr-card-bg: #1c1c1f;
+  --tblr-dropdown-bg: #232326;
+  --tblr-dropdown-border-color: rgba(255, 255, 255, 0.1);
+  --tblr-dropdown-link-hover-bg: rgba(255, 255, 255, 0.06);
+  --tblr-form-control-bg: #1a1a1d;
+  --tblr-btn-color: #e6e6e9;
+  --tblr-btn-bg: #242427;
+  --tblr-btn-border-color: rgba(255, 255, 255, 0.1);
+  --tblr-btn-hover-bg: #2c2c30;
+  --tblr-btn-hover-border-color: rgba(255, 255, 255, 0.16);
+  --tblr-active-bg: rgba(255, 255, 255, 0.06);
+  --tblr-code-color: #d6d6dc;
+  --tblr-avatar-bg: #2c2c30;
+}
+:root[data-bs-theme="dark"] .card { box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05); }
+:root[data-bs-theme="dark"] .dropdown-menu { box-shadow: var(--tblr-box-shadow-dropdown); }
+:root[data-bs-theme="dark"] .form-control { background: var(--tblr-form-control-bg); border-color: var(--tblr-border-color); }
+:root[data-bs-theme="dark"] .form-control:focus { border-color: rgba(10, 132, 255, 0.6); box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.2); }
+:root[data-bs-theme="dark"] .btn-primary { background: var(--tblr-primary); border-color: var(--tblr-primary); color: #fff; }
+:root[data-bs-theme="dark"] .btn-primary:hover { background: #3395ff; border-color: #3395ff; }
+:root[data-bs-theme="dark"] ::selection { background: rgba(10, 132, 255, 0.35); }
+:root[data-bs-theme="dark"] .dispatch-panel-controls .btn[aria-pressed="true"] { background: rgba(255, 255, 255, 0.08); border-color: transparent; color: var(--tblr-body-color); }
+:root[data-bs-theme="dark"] .dispatch-message.active, :root[data-bs-theme="dark"] .dispatch-message.dispatch-message-unread.active { background: rgba(10, 132, 255, 0.22); }

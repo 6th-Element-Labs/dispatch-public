@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "web-toolbar",
+  "description": "Only the local toolbar has browser controls. The remote link-content webview has no capability or IPC access.",
+  "webviews": ["link-toolbar"],
+  "permissions": ["allow-web-link-controls"]
+}

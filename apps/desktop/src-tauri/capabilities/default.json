@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window renders the Dispatch web client and may drag or zoom its own native window. Sidecar spawning, dialogs, and log reveal are done from Rust; the page receives no shell, filesystem, dialog, or opener permission.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize",
+    "allow-popup-context-menu",
+    "allow-open-web-link",
+    "allow-set-appearance"
+  ]
+}

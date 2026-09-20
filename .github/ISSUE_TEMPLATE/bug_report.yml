@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a reproducible Dispatch problem with synthetic or redacted data.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: input
+    id: dispatch-version
+    attributes:
+      label: Dispatch version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "14.7"
+    validations:
+      required: true
+  - type: dropdown
+    id: codex-surface
+    attributes:
+      label: Codex surface
+      options:
+        - ChatGPT desktop
+        - Codex CLI
+        - Both
+        - Codex is not installed
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use synthetic account names, messages, and attachments.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed private email, message bodies, OAuth data, tokens, account IDs, and unredacted logs.
+          required: true
