@@ -24,6 +24,8 @@ Selecting a conversation loads the complete Gmail thread with the newest message
 
 Selecting an unread Gmail conversation starts a 5-second dwell. If that conversation stays selected, Dispatch marks it read through mail. The row stays unread until mail accepts the command. After mail accepts, the row stays read without Refresh, even if a later thread fetch or Gmail sync still reports unread. Demo conversations do not auto-mark. On the Unread filter, the row leaves the list and the reader stays on that conversation.
 
+An explicit Mark as Unread stays unread when the user reopens that conversation, including after navigating away or restarting Dispatch. Only an explicit Mark Read clears that choice. Live Gmail messages do not display an Offline badge; a saved copy used because Gmail is unavailable is labeled Downloaded copy.
+
 A right-click on a thread row selects that conversation and does not start the dwell. In Dispatch.app the shell shows a native macOS menu of the same reader actions. The browser shows an HTML menu with the same command ids. Mail still owns every Gmail write. A failed native popup is a visible mail error and does not open the page menu.
 
 Unread rows show a blue avatar mark, bold sender and subject, and a light blue background. Read rows use normal weight and dimmer text.

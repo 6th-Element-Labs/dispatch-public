@@ -394,7 +394,7 @@ export function createAgentServer(runtime: AgentRuntime, options: { bindings?: C
         const payload = await body(request)
         const linkId = typeof payload.linkId === 'string' ? payload.linkId : ''
         const messageId = typeof payload.messageId === 'string' ? payload.messageId : ''
-        const format = payload.format === 'metadata' ? 'metadata' : 'full'
+        const format = payload.format === 'metadata' ? 'metadata' : payload.format === 'raw' ? 'raw' : 'full'
         if (!messageId) return json(response, 400, { error: 'messageId_required' })
         const gmail = await inventory()
         if (!gmail.server || !gmail.tools.read) return json(response, 503, { error: 'gmail_read_unavailable' })

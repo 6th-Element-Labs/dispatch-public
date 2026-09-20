@@ -10,6 +10,7 @@ import { homedir } from 'node:os'
 import { join, resolve, isAbsolute, basename, extname } from 'node:path'
 import { folderFlagsFromLabels, GmailIndex, type GmailSyncStatus, type IndexedGmailMessage, type IndexStreamFlag } from './gmail-index.js'
 import type { AttachmentProjection, ConversationProjection, ConversationSummary, DraftAttachment, DraftProjection, GmailConversationAction, GmailMailbox, MailAddress, MailStateFilter, MailboxCounts, MessageProjection, MessageSummary } from './model.js'
+import { decodeRawMessage, findPart, parseMime } from './mime-part.js'
 
 export interface GmailAccountProjection {
   readonly id: string
@@ -56,6 +57,13 @@ function text(value: unknown): string {
 
 function array(value: unknown): readonly unknown[] {
   return Array.isArray(value) ? value : []
+}
+
+/** The connector reports an unreadable type inside a 200 with `isError` and `error_data.code`. */
+export function unsupportedAttachmentType(value: unknown): boolean {
+  const content = structured(value)
+  return text(record(content.error_data)?.code) === 'unsupported_attachment_type'
+    || text(record(content.error_data)?.reason) === 'unsupported_attachment_type'
 }
 
 function structured(value: unknown): UnknownRecord {
@@ -1238,10 +1246,30 @@ export class GmailConnectorProvider {
       this.#scheduleSync(5_000)
     }
   }
-  async readAttachment(accountId: string, messageId: string, attachmentId: string, _filename: string): Promise<unknown> {
+  async readAttachment(accountId: string, messageId: string, attachmentId: string, filename: string): Promise<unknown> {
     // The connector selects by attachment id. Sending the filename as well makes
     // the selector ambiguous when a message carries several files with one name.
-    return this.#post('/v1/connectors/gmail/attachment', { linkId: accountId, messageId, attachmentId })
+    try {
+      return await this.#post('/v1/connectors/gmail/attachment', { linkId: accountId, messageId, attachmentId })
+    } catch (error) {
+      if (!unsupportedAttachmentType((error as { connectorPayload?: unknown }).connectorPayload)) throw error
+    }
+    // The connector refuses types it cannot extract text from (calendar invites among them).
+    // The raw RFC 2822 message still carries the bytes, so cut the part out of that.
+    return this.#attachmentFromRawMessage(accountId, messageId, attachmentId, filename)
+  }
+
+  async #attachmentFromRawMessage(accountId: string, messageId: string, attachmentId: string, filename: string): Promise<unknown> {
+    const message = await this.readMessage(accountId, messageId)
+    const target = message.attachments.find((item) => item.id === attachmentId) ?? message.attachments.find((item) => item.name === filename)
+    if (!target) throw Object.assign(new Error(`Attachment ${filename || attachmentId} is not part of this message`), { code: 'attachment_not_found' })
+    const twins = message.attachments.filter((item) => item.name === target.name && item.mediaType === target.mediaType)
+    const ordinal = Math.max(0, twins.indexOf(target))
+    const raw = text(structured(await this.#post('/v1/connectors/gmail/read', { linkId: accountId, messageId, format: 'raw' })).raw)
+    if (!raw) throw new Error('Gmail did not return the raw message, so the attachment could not be read')
+    const part = findPart(parseMime(decodeRawMessage(raw)), { filename: target.name, mimeType: target.mediaType, ordinal })
+    if (!part) throw Object.assign(new Error(`Attachment ${target.name} was not found in the raw message`), { code: 'attachment_not_found' })
+    return { structuredContent: { base64_url_content: part.body.toString('base64url'), mime_type: part.mimeType, size_bytes: part.body.length } }
   }
 
   async #account(accountId: string): Promise<GmailAccountProjection> {
@@ -1355,7 +1383,7 @@ export class GmailConnectorProvider {
       if (!this.#stopped) this.#local.putRetryAfter(linkId, retryAt)
     }
     if (!response.ok) throw new Error(`Gmail connector request failed (${response.status}): ${JSON.stringify(value)}`)
-    if (record(value)?.isError || structured(value).error) throw new Error(`Gmail connector rejected the request: ${JSON.stringify(value)}`)
+    if (record(value)?.isError || structured(value).error) throw Object.assign(new Error(`Gmail connector rejected the request: ${JSON.stringify(value)}`), { connectorPayload: value })
     return value
   }
 }

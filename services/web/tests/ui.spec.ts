@@ -514,7 +514,7 @@ test('? opens the shortcut sheet and toolbar buttons carry their key', async ({ 
   await expect(page.locator('.dispatch-agent-error').last()).toContainText('Connect a Gmail account before composing mail.')
 })
 
-test('the reader meta line reads account, folder, count, and an offline chip in one row', async ({ page }) => {
+test('the reader labels only downloaded copies, not live Gmail messages', async ({ page }) => {
   await page.route('http://127.0.0.1:8411/v1/accounts', (route) => route.fulfill({ json: { accounts: [
     { id: 'link-one', connectorId: 'gmail-app', name: 'Work', email: 'work@example.com' },
     { id: 'link-two', connectorId: 'gmail-app', name: 'Home', email: 'home@example.com' },
@@ -531,14 +531,12 @@ test('the reader meta line reads account, folder, count, and an offline chip in 
   await page.goto('/')
   await page.locator('[data-conversation-id="gmail:link-one:t1"]').click()
   const meta = page.locator('[data-thread-meta]')
-  await expect(meta).toHaveText(/work@example\.com\s*·\s*Inbox\s*·\s*2 messages\s*Offline/)
-  await expect(page.locator('[data-copy-status]')).toHaveAttribute('data-mode', 'live')
-  await expect(page.locator('[data-copy-status]')).toHaveAttribute('title', /Saved on this Mac/)
-  await expect(page.locator('.dispatch-copy-status')).toHaveCount(0)
-  const [metaBox, chipBox] = await Promise.all([meta.boundingBox(), page.locator('[data-copy-status]').boundingBox()])
-  expect(Math.abs(chipBox!.y - metaBox!.y)).toBeLessThan(8)
+  await expect(meta).toHaveText(/work@example\.com\s*·\s*Inbox\s*·\s*2 messages/)
+  await expect(page.locator('[data-copy-status]')).toBeHidden()
+  await expect(meta).not.toContainText('Offline')
   await page.locator('[data-conversation-id="gmail:link-one:t2"]').click()
   await expect(meta).not.toContainText('message')
+  await expect(page.locator('[data-copy-status]')).toBeVisible()
   await expect(page.locator('[data-copy-status]')).toHaveText(/Downloaded copy/)
   await expect(page.locator('[data-copy-status]')).toHaveAttribute('data-mode', 'downloaded')
   await expect(page.locator('[data-copy-status]')).toHaveAttribute('title', /Gmail is unavailable/)
@@ -1995,25 +1993,69 @@ test('marks unread from the thread context menu through the same read-state hand
   await expect.poll(() => command).toEqual({ accountId: 'link-one', messageIds: ['m1'], unread: true })
 })
 
-test('keeps a manually unread thread unread when the same row is clicked again', async ({ page }) => {
+test('keeps an explicitly unread thread unread across navigation and reload', async ({ page }) => {
   await page.clock.install()
-  const summary = { ...conversations[0]!, accountId: 'link-one', accountLabel: 'work@example.com', unread: false }
-  await stubGmailInbox(page, summary)
+  await page.unroute('http://127.0.0.1:8411/v1/accounts')
+  await page.unroute(/http:\/\/127\.0\.0\.1:8411\/v1\/conversations\?state=(all|read|unread)/)
+  await page.route('http://127.0.0.1:8411/v1/accounts', (route) => route.fulfill({ json: { accounts: [{ id: 'link-one', connectorId: 'gmail-app', name: 'Work', email: 'work@example.com' }] } }))
+  const first = { ...conversations[0]!, accountId: 'link-one', accountLabel: 'work@example.com', unread: false }
+  const second = { ...conversations[1]!, accountId: 'link-one', accountLabel: 'work@example.com', unread: false }
+  let firstUnread = false
+  await page.route(/http:\/\/127\.0\.0\.1:8411\/v1\/conversations\?state=(all|read|unread)/, (route) => {
+    const state = new URL(route.request().url()).searchParams.get('state')
+    const items = [{ ...first, unread: firstUnread }, second].filter(item => state === 'all' || (state === 'unread' ? item.unread : !item.unread))
+    return route.fulfill({ json: { source: 'gmail', conversations: items, nextCursor: null, total: items.length } })
+  })
+  await page.route(/http:\/\/127\.0\.0\.1:8411\/v1\/conversations\/t1\?account=link-one/, (route) => route.fulfill({ json: { conversation: { ...first, unread: firstUnread, source: 'gmail', messages: [{ ...messages[0]!, accountId: 'link-one', source: 'gmail', unread: firstUnread, body: { kind: 'plain-text', content: 'Body' }, attachments: [] }] } } }))
+  await page.route(/http:\/\/127\.0\.0\.1:8411\/v1\/conversations\/t2\?account=link-one/, (route) => route.fulfill({ json: { conversation: { ...second, source: 'gmail', messages: [{ ...messages[1]!, accountId: 'link-one', source: 'gmail', body: { kind: 'plain-text', content: 'Other' }, attachments: [] }] } } }))
   const writes: unknown[] = []
   await page.route('http://127.0.0.1:8411/v1/conversations/t1/read-state', async (route) => {
-    const body = route.request().postDataJSON()
+    const body = route.request().postDataJSON() as { unread: boolean }
     writes.push(body)
-    await route.fulfill({ json: { accepted: true, result: { unread: (body as { unread: boolean }).unread } } })
+    firstUnread = body.unread
+    await route.fulfill({ json: { accepted: true, result: { unread: firstUnread } } })
   })
   await page.goto('/')
   await page.locator('[data-conversation-id="demo:t1"]').click()
   await page.getByRole('button', { name: 'Mark unread' }).click()
   await expect(page.locator('[data-conversation-id="demo:t1"]')).toHaveClass(/dispatch-message-unread/)
+  await page.locator('[data-conversation-id="demo:t2"]').click()
   await page.locator('[data-conversation-id="demo:t1"]').click()
   await page.clock.fastForward(6_000)
   await expect(page.locator('[data-conversation-id="demo:t1"]')).toHaveClass(/dispatch-message-unread/)
   await expect(page.getByRole('button', { name: 'Mark read' })).toBeVisible()
+  await page.reload()
+  await page.locator('[data-conversation-id="demo:t1"]').click()
+  await page.clock.fastForward(6_000)
+  await expect(page.locator('[data-conversation-id="demo:t1"]')).toHaveClass(/dispatch-message-unread/)
   expect(writes).toEqual([{ accountId: 'link-one', messageIds: ['m1'], unread: true }])
+  await page.getByRole('button', { name: 'Mark read' }).click()
+  await expect(page.locator('[data-conversation-id="demo:t1"]')).not.toHaveClass(/dispatch-message-unread/)
+  expect(writes).toEqual([
+    { accountId: 'link-one', messageIds: ['m1'], unread: true },
+    { accountId: 'link-one', messageIds: ['m1'], unread: false },
+  ])
+})
+
+test('moves a newly marked unread thread out of the Read filter', async ({ page }) => {
+  const summary = { ...conversations[0]!, accountId: 'link-one', accountLabel: 'work@example.com', unread: false }
+  await stubGmailInbox(page, summary)
+  await page.route(/http:\/\/127\.0\.0\.1:8411\/v1\/conversations\?state=(read|unread)/, (route) => {
+    const state = new URL(route.request().url()).searchParams.get('state')
+    const items = state === (summary.unread ? 'unread' : 'read') ? [summary] : []
+    return route.fulfill({ json: { source: 'gmail', conversations: items, nextCursor: null, total: items.length } })
+  })
+  await page.route('http://127.0.0.1:8411/v1/conversations/t1/read-state', async (route) => {
+    summary.unread = (route.request().postDataJSON() as { unread: boolean }).unread
+    await route.fulfill({ json: { accepted: true, result: { unread: summary.unread } } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Read', exact: true }).click()
+  await page.locator('[data-conversation-id="demo:t1"]').click()
+  await page.getByRole('button', { name: 'Mark unread' }).click()
+  await expect(page.locator('[data-conversation-id="demo:t1"]')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Unread', exact: true }).click()
+  await expect(page.locator('[data-conversation-id="demo:t1"]')).toBeVisible()
 })
 
 test('moves a conversation to Trash from the thread context menu', async ({ page }) => {

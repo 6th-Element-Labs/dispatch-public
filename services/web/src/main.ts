@@ -429,7 +429,21 @@ let selection: SelectionState = EMPTY_SELECTION
 let readerNeedsRetry = false
 let selectionSequence = 0
 const markReadDwell = createMarkReadDwell()
-let manuallyUnreadConversationId: string | undefined
+const MANUALLY_UNREAD_KEY = 'dispatch.manually-unread.v1'
+const manuallyUnreadConversationIds = (() => {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(MANUALLY_UNREAD_KEY) ?? '[]')
+    return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : [])
+  } catch { return new Set<string>() }
+})()
+function rememberManualUnread(conversationId: string, unread: boolean): boolean {
+  if (unread) manuallyUnreadConversationIds.add(conversationId)
+  else manuallyUnreadConversationIds.delete(conversationId)
+  try {
+    localStorage.setItem(MANUALLY_UNREAD_KEY, JSON.stringify([...manuallyUnreadConversationIds]))
+    return true
+  } catch { return false }
+}
 let conversationLoadSequence = 0
 const conversationCache = new Map<string, Promise<ConversationProjection>>()
 const BINDING_CACHE = 'dispatch.codex.bindings.v1'
@@ -891,12 +905,11 @@ function accountColor(accountId: string | undefined): string {
 }
 
 function renderCopyChip(availability: ConversationProjection['availability']): void {
-  elements.copyStatus.hidden = !availability
-  if (!availability) return
-  const downloaded = availability.mode === 'downloaded'
-  elements.copyStatus.dataset.mode = availability.mode
-  elements.copyLabel.textContent = downloaded ? 'Downloaded copy' : 'Offline'
-  elements.copyStatus.title = `${downloaded ? 'Showing the copy saved on this Mac' : 'Saved on this Mac'} · ${new Date(availability.cachedAt).toLocaleString()}${availability.reason ? ` · ${availability.reason}` : ''}`
+  elements.copyStatus.hidden = availability?.mode !== 'downloaded'
+  if (availability?.mode !== 'downloaded') return
+  elements.copyStatus.dataset.mode = 'downloaded'
+  elements.copyLabel.textContent = 'Downloaded copy'
+  elements.copyStatus.title = `Showing the copy saved on this Mac · ${new Date(availability.cachedAt).toLocaleString()}${availability.reason ? ` · ${availability.reason}` : ''}`
 }
 
 function renderThreadMeta(summary: Pick<ConversationSummary, 'messageCount' | 'accountId' | 'accountLabel'>): void {
@@ -1070,7 +1083,6 @@ async function openAttachment(message: MessageProjection, attachmentId: string, 
 
 async function selectConversation(id: string, options: { revealOnMobile?: boolean; startReadDwell?: boolean; refresh?: boolean } = {}): Promise<void> {
   markReadDwell.cancel()
-  if (selectedConversationId !== id) manuallyUnreadConversationId = undefined
   const matchResult = searchView?.results.find(result => result.conversation.id === id)
   const summary = matchResult?.conversation ?? conversations.find((conversation) => conversation.id === id)
   if (!summary) return
@@ -1124,7 +1136,7 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
   elements.body.replaceChildren(loading)
   elements.attachments.replaceChildren()
   elements.threadFilesToggle.hidden = true
-  if (!offlineMode && options.startReadDwell && summary.unread && summary.accountId && manuallyUnreadConversationId !== id) {
+  if (!offlineMode && options.startReadDwell && summary.unread && summary.accountId && !manuallyUnreadConversationIds.has(id)) {
     const conversationId = summary.id
     markReadDwell.schedule(conversationId, () => { void completeReadDwell(conversationId) })
   }
@@ -1260,13 +1272,13 @@ if (!offlineMode && !String(error).includes('not_downloaded')) window.setTimeout
 }
 
 async function completeReadDwell(conversationId: string): Promise<void> {
-  if (selectedConversationId !== conversationId) return
+  if (selectedConversationId !== conversationId || manuallyUnreadConversationIds.has(conversationId)) return
   const summary = conversations.find((conversation) => conversation.id === conversationId)
   if (!summary?.accountId || !summary.unread) return
   const messageIds = selectedConversationId === conversationId && selected ? selected.messages.map((message) => message.id) : []
   try {
     await api.setConversationUnread(summary.threadId, summary.accountId, false, messageIds)
-    if (selectedConversationId !== conversationId) return
+    if (selectedConversationId !== conversationId || manuallyUnreadConversationIds.has(conversationId)) return
     applyLocalReadState(conversationId, false)
   } catch (error) {
     if (selectedConversationId !== conversationId) return
@@ -1281,7 +1293,7 @@ function applyLocalReadState(conversationId: string, unread: boolean): void {
   if (selectedConversationId === conversationId && selected) selected = { ...selected, unread }
   conversations = conversations
     .map((conversation) => conversation.id === conversationId ? { ...conversation, unread } : conversation)
-    .filter((conversation) => mailState !== 'unread' || conversation.unread)
+    .filter((conversation) => mailState === 'all' || (mailState === 'unread' ? conversation.unread : !conversation.unread))
   if (selectedConversationId === conversationId) renderReadState(unread)
   renderList()
 }
@@ -1301,7 +1313,7 @@ function applyAcceptedReadState(items: readonly ConversationSummary[]): Conversa
       const unread = acceptedReadState.get(conversation.id)
       return unread === undefined ? conversation : { ...conversation, unread }
     })
-    .filter((conversation) => mailState !== 'unread' || conversation.unread)
+    .filter((conversation) => mailState === 'all' || (mailState === 'unread' ? conversation.unread : !conversation.unread))
 }
 
 function syncSelectedReadState(): void {
@@ -1328,11 +1340,14 @@ async function applyReadState(nextUnread: boolean): Promise<void> {
   renderReadState(!nextUnread, true)
   try {
     await api.setConversationUnread(selected.threadId, selected.accountId, nextUnread, selected.messages.map((message) => message.id))
-    if (selectedConversationId !== conversationId) return
-    manuallyUnreadConversationId = nextUnread ? conversationId : undefined
+    const remembered = rememberManualUnread(conversationId, nextUnread)
     applyLocalReadState(conversationId, nextUnread)
+    if (!remembered) {
+      elements.mailError.hidden = false
+      elements.mailError.textContent = 'Gmail accepted the read change, but this Mac could not remember it across restarts.'
+    }
   } catch (error) {
-    renderReadState(selected.unread)
+    if (selectedConversationId === conversationId) renderReadState(selected.unread)
     elements.mailError.hidden = false
     elements.mailError.textContent = error instanceof Error ? error.message : String(error)
   } finally {
