@@ -38,6 +38,8 @@ describe('public release workflow', () => {
       'release:verify-updater',
       'write-sha256sums.mjs',
       'TAURI_SIGNING_PRIVATE_KEY',
+      'notarytool submit "$DMG"',
+      'xcrun stapler staple "$DMG"',
       '--url-intel',
       '--sig-intel',
       'latest.json',

@@ -145,6 +145,32 @@ jobs:
             --target "${{ matrix.target }}" \
             --bundles app,dmg
 
+      - name: Notarize and staple the outer DMG
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
+        run: |
+          set -euo pipefail
+          BUNDLE="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
+          DMG="$(find "$BUNDLE/dmg" -name '*.dmg' -print -quit)"
+          test -s "$DMG"
+          xcrun notarytool submit "$DMG" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait \
+            --output-format json > "$RUNNER_TEMP/dmg-notary.json"
+          python3 - <<'PY'
+          import json, os
+          with open(os.path.join(os.environ['RUNNER_TEMP'], 'dmg-notary.json')) as stream:
+              result = json.load(stream)
+          if result.get('status') != 'Accepted':
+              raise SystemExit(f"DMG notarization failed: {result.get('status')}")
+          print('Outer DMG notarization accepted')
+          PY
+          xcrun stapler staple "$DMG"
+
       - name: Verify the signed release
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

@@ -16,6 +16,13 @@ export function verificationCommands(app) {
   ]
 }
 
+export function dmgVerificationCommands(dmg) {
+  return [
+    ['xcrun', ['stapler', 'validate', dmg]],
+    ['spctl', ['--assess', '--type', 'open', '--context', 'context:primary-signature', dmg]],
+  ]
+}
+
 async function runChecked(run, command, args) {
   try {
     return await run(command, args)
@@ -33,6 +40,9 @@ async function verifyApp(app, run) {
 export async function verifyRelease({ app, dmg }, run = execute) {
   await verifyApp(resolve(app), run)
   if (!dmg) return
+  for (const [command, args] of dmgVerificationCommands(resolve(dmg))) {
+    await runChecked(run, command, args)
+  }
   const mount = await mkdtemp(join(tmpdir(), 'dispatch-release-mount-'))
   let attached = false
   try {

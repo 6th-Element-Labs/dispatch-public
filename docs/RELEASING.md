@@ -60,10 +60,14 @@ Download both draft DMGs and `SHA256SUMS.txt`. Verify the checksum of each DMG, 
 
 ```bash
 shasum -a 256 -c SHA256SUMS.txt
+xcrun stapler validate Dispatch_0.1.1_arm64.dmg
+spctl --assess --type open --context context:primary-signature Dispatch_0.1.1_arm64.dmg
 codesign --verify --deep --strict /Volumes/Dispatch/Dispatch.app
 spctl --assess --type execute /Volumes/Dispatch/Dispatch.app
 xcrun stapler validate /Volumes/Dispatch/Dispatch.app
 ```
+
+Run the DMG checks for both `arm64` and `x86_64` before publication.
 
 On clean Apple Silicon and Intel Macs running macOS 14 or later, test each matching DMG:
 

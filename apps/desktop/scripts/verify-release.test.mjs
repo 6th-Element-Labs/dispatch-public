@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { verificationCommands, verifyRelease } from './verify-release.mjs'
+import { dmgVerificationCommands, verificationCommands, verifyRelease } from './verify-release.mjs'
 
 describe('macOS release verification', () => {
   it('checks signature, Gatekeeper, and notarization staple', () => {
@@ -9,6 +9,14 @@ describe('macOS release verification', () => {
       ['codesign', ['--verify', '--deep', '--strict', app]],
       ['spctl', ['--assess', '--type', 'execute', app]],
       ['xcrun', ['stapler', 'validate', app]],
+    ])
+  })
+
+  it('checks the outer DMG ticket and Gatekeeper assessment', () => {
+    const dmg = '/tmp/Dispatch.dmg'
+    assert.deepEqual(dmgVerificationCommands(dmg), [
+      ['xcrun', ['stapler', 'validate', dmg]],
+      ['spctl', ['--assess', '--type', 'open', '--context', 'context:primary-signature', dmg]],
     ])
   })
 
