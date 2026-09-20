@@ -1182,13 +1182,14 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
   try {
     const conversation = await request
     if (sequence !== selectionSequence || selectedConversationId !== id) return
-    selected = conversation
+    // Cached bodies can have old labels. The current mailbox projection and
+    // accepted commands own the row and toolbar's read state together.
+    const currentSummary = conversations.find(item => item.id === id) ?? summary
+    selected = { ...conversation, unread: acceptedReadState.get(id) ?? currentSummary.unread }
     readerNeedsRetry = !offlineMode && conversation.availability?.mode === 'downloaded'
     renderCopyChip(conversation.availability)
     if (conversation.availability?.mode === 'downloaded') markReadDwell.cancel()
     elements.readState.hidden = !conversation.accountId
-    const acceptedUnread = selectedConversationId ? acceptedReadState.get(selectedConversationId) : undefined
-    if (acceptedUnread !== undefined) selected = { ...selected, unread: acceptedUnread }
     renderReadState(selected.unread)
     elements.subject.textContent = conversation.subject
     renderThreadMeta({ ...conversation, messageCount: conversation.messages.length })
@@ -1333,13 +1334,14 @@ function renderReadState(unread: boolean, busy = false): void {
   elements.readStateLabel.textContent = unread ? 'Read' : 'Unread'
 }
 
-async function applyReadState(nextUnread: boolean): Promise<void> {
-  if (!selected?.accountId) return
-  const conversationId = selected.id
+async function applyReadState(nextUnread: boolean, target: ConversationSummary | undefined = selected): Promise<void> {
+  if (!target?.accountId) return
+  const conversationId = target.id
+  const messageIds = selected?.id === conversationId ? selected.messages.map(message => message.id) : []
   elements.readState.disabled = true
   renderReadState(!nextUnread, true)
   try {
-    await api.setConversationUnread(selected.threadId, selected.accountId, nextUnread, selected.messages.map((message) => message.id))
+    await api.setConversationUnread(target.threadId, target.accountId, nextUnread, messageIds)
     const remembered = rememberManualUnread(conversationId, nextUnread)
     applyLocalReadState(conversationId, nextUnread)
     if (!remembered) {
@@ -1347,7 +1349,7 @@ async function applyReadState(nextUnread: boolean): Promise<void> {
       elements.mailError.textContent = 'Gmail accepted the read change, but this Mac could not remember it across restarts.'
     }
   } catch (error) {
-    if (selectedConversationId === conversationId) renderReadState(selected.unread)
+    if (selectedConversationId === conversationId) renderReadState(selected?.unread ?? target.unread)
     elements.mailError.hidden = false
     elements.mailError.textContent = error instanceof Error ? error.message : String(error)
   } finally {
@@ -1386,6 +1388,10 @@ async function openThreadContextMenu(event: MouseEvent, conversationId: string):
   try {
     const chosen = await popupContextMenu(items, { clientX: event.clientX, clientY: event.clientY })
     if (!chosen) return
+    if (chosen === 'markRead' || chosen === 'markUnread') {
+      await applyReadState(chosen === 'markUnread', summary)
+      return
+    }
     await load
     await runThreadContextCommand(chosen)
   } catch (error) {

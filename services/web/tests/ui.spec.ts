@@ -1993,6 +1993,54 @@ test('marks unread from the thread context menu through the same read-state hand
   await expect.poll(() => command).toEqual({ accountId: 'link-one', messageIds: ['m1'], unread: true })
 })
 
+test('stale cached unread labels cannot reverse the toolbar or row styling', async ({ page }) => {
+  const summary = { ...conversations[0]!, accountId: 'link-one', accountLabel: 'work@example.com', unread: false }
+  await stubGmailInbox(page, summary)
+  await page.route(/8411\/v1\/conversations\/t1\?account=link-one/, route => route.fulfill({ json: { conversation: {
+    ...summary, unread: true, source: 'gmail', availability: { mode: 'downloaded', cachedAt: '2026-09-20T00:00:00Z' },
+    messages: [{ ...messages[0]!, accountId: 'link-one', source: 'gmail', unread: true, body: { kind: 'plain-text', content: 'Saved body with old labels' }, attachments: [] }],
+  } } }))
+  const writes: unknown[] = []
+  await page.route('http://127.0.0.1:8411/v1/conversations/t1/read-state', async route => {
+    writes.push(route.request().postDataJSON());
+    await route.fulfill({ json: { accepted: true } })
+  })
+  await page.goto('/')
+  const row = page.locator('[data-conversation-id="demo:t1"]')
+  await expect(page.getByRole('button', { name: 'Mark unread' })).toBeVisible()
+  await expect(row.locator('strong')).toHaveCSS('font-weight', '400')
+  await page.getByRole('button', { name: 'Mark unread' }).click()
+  await expect(row).toHaveClass(/dispatch-message-unread/)
+  await expect(row.locator('strong')).toHaveCSS('font-weight', '700')
+  await expect(row.locator('b')).toHaveCSS('font-weight', '700')
+  await expect(page.getByRole('button', { name: 'Mark read' })).toBeVisible()
+  await row.click()
+  await expect(row.locator('strong')).toHaveCSS('font-weight', '700')
+  expect(writes).toEqual([{ accountId: 'link-one', unread: true, messageIds: ['m1'] }])
+})
+
+test('Mark as Unread from the row does not wait for a slow message body', async ({ page }) => {
+  const summary = { ...conversations[0]!, accountId: 'link-one', unread: false }
+  await stubGmailInbox(page, summary)
+  let pendingBody: import('@playwright/test').Route | undefined
+  await page.route(/8411\/v1\/conversations\/t1\?account=link-one/, route => { pendingBody = route })
+  let command: unknown
+  await page.route('http://127.0.0.1:8411/v1/conversations/t1/read-state', async route => {
+    command = route.request().postDataJSON()
+    await route.fulfill({ json: { accepted: true } })
+  })
+  await page.goto('/')
+  await chooseThreadMenu(page, 'Mark as Unread')
+  await expect.poll(() => command).toEqual({ accountId: 'link-one', unread: true, messageIds: [] })
+  const row = page.locator('[data-conversation-id="demo:t1"]')
+  await expect(row.locator('strong')).toHaveCSS('font-weight', '700')
+  await expect(row.locator('b')).toHaveCSS('font-weight', '700')
+  await pendingBody!.fulfill({ json: { conversation: { ...summary, source: 'gmail', messages: [{ ...messages[0]!, accountId: 'link-one', unread: false, source: 'gmail', body: { kind: 'plain-text', content: 'Late body' }, attachments: [] }] } } })
+  await expect(page.getByText('Late body', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Mark read' })).toBeVisible()
+  await expect(row.locator('strong')).toHaveCSS('font-weight', '700')
+})
+
 test('keeps an explicitly unread thread unread across navigation and reload', async ({ page }) => {
   await page.clock.install()
   await page.unroute('http://127.0.0.1:8411/v1/accounts')

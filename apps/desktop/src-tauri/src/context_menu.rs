@@ -2,6 +2,7 @@
 //! returns the chosen command id. It does not choose labels or call mail.
 
 use std::sync::{mpsc, Mutex};
+use std::time::Duration;
 
 use serde::Deserialize;
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder};
@@ -92,24 +93,37 @@ fn build_context_menu<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn popup_context_menu(
+pub async fn popup_context_menu(
     app: AppHandle,
     window: WebviewWindow,
     items: Vec<ContextMenuItem>,
 ) -> Result<Option<String>, String> {
     let parsed = parse_context_menu_items(items)?;
-    let menu = build_context_menu(&app, &parsed).map_err(|error| error.to_string())?;
-    let (tx, rx) = mpsc::channel();
-    {
-        let pending = app.state::<ContextMenuPending>();
-        *pending.0.lock().map_err(|error| error.to_string())? = Some(tx);
-    }
-    window.popup_menu(&menu).map_err(|error| error.to_string())?;
-    {
-        let pending = app.state::<ContextMenuPending>();
-        *pending.0.lock().map_err(|error| error.to_string())? = None;
-    }
-    Ok(rx.try_recv().ok())
+    tauri::async_runtime::spawn_blocking(move || {
+        let menu = build_context_menu(&app, &parsed).map_err(|error| error.to_string())?;
+        let (tx, rx) = mpsc::channel();
+        {
+            let pending = app.state::<ContextMenuPending>();
+            let mut guard = pending.0.lock().map_err(|error| error.to_string())?;
+            if guard.is_some() { return Err("A context menu is already open".into()); }
+            *guard = Some(tx);
+        }
+        let shown = window.popup_menu(&menu).map_err(|error| error.to_string());
+        // macOS dismisses the popup before Tauri delivers its queued menu event.
+        // Wait off the UI thread so that event can reach record_choice.
+        let choice = if shown.is_ok() { receive_choice(&rx) } else { None };
+        {
+            let pending = app.state::<ContextMenuPending>();
+            *pending.0.lock().map_err(|error| error.to_string())? = None;
+        }
+        shown?;
+        Ok(choice.filter(|id| parsed.iter().any(|entry| matches!(entry,
+            ContextMenuEntry::Command { id: allowed, enabled: true, .. } if allowed == id))))
+    }).await.map_err(|error| error.to_string())?
+}
+
+fn receive_choice(receiver: &mpsc::Receiver<String>) -> Option<String> {
+    receiver.recv_timeout(Duration::from_secs(1)).ok()
 }
 
 #[cfg(test)]
@@ -181,6 +195,24 @@ mod tests {
         *pending.0.lock().expect("pending") = Some(tx);
         record_pending_choice(&pending, "trash");
         assert_eq!(rx.try_recv().expect("chosen"), "trash");
+    }
+
+    #[test]
+    fn receives_the_menu_event_delivered_after_popup_dismissal() {
+        let (tx, rx) = mpsc::channel();
+        let delivery = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            tx.send("markUnread".into()).expect("deliver native selection");
+        });
+        assert_eq!(receive_choice(&rx).as_deref(), Some("markUnread"));
+        delivery.join().expect("event delivery");
+    }
+
+    #[test]
+    fn cancellation_returns_no_command() {
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        assert_eq!(receive_choice(&rx), None);
     }
 
     #[test]
