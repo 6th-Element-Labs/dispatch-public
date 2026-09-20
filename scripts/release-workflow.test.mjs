@@ -15,6 +15,13 @@ async function readPublicFile(templatePath, exportedPath) {
 }
 
 describe('public release workflow', () => {
+  it('signs the bundled Node runtime with the JIT entitlement', async () => {
+    const config = JSON.parse(await readFile(resolve(root, 'apps/desktop/src-tauri/tauri.conf.json'), 'utf8'))
+    assert.equal(config.bundle.macOS.entitlements, 'Node.entitlements.plist')
+    const entitlements = await readFile(resolve(root, 'apps/desktop/src-tauri/Node.entitlements.plist'), 'utf8')
+    assert.match(entitlements, /<key>com\.apple\.security\.cs\.allow-jit<\/key>\s*<true\/>/)
+  })
+
   it('gates a signed Apple Silicon and Intel draft release', async () => {
     const workflow = await readPublicFile(
       'deploy/public/.github/workflows/release.yml',
@@ -40,6 +47,8 @@ describe('public release workflow', () => {
       'TAURI_SIGNING_PRIVATE_KEY',
       'notarytool submit "$DMG"',
       'xcrun stapler staple "$DMG"',
+      "entitlements.get('com.apple.security.cs.allow-jit') is not True",
+      'Bundled Node can run JavaScript',
       '--url-intel',
       '--sig-intel',
       'latest.json',

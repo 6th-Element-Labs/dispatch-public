@@ -1,6 +1,7 @@
 import { watchParent } from './parent-watch.js'
 import { projectSearchResults, type SearchMatch } from './search-results.js'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { DemoMailProvider } from './demo-provider.js'
 import { renderDraftMarkdown } from './draft-markdown.js'
@@ -8,7 +9,7 @@ import { projectDraft } from './draft.js'
 import { GmailConnectorProvider } from './gmail-provider.js'
 import type { DraftAttachment, GmailConversationAction, GmailMailbox, MailStateFilter } from './model.js'
 import { readFile } from 'node:fs/promises'
-import { defaultAttachmentCacheDir, defaultOpenPath, ensureAttachmentFile, openAttachmentFile } from './open-attachment.js'
+import { MAX_ATTACHMENT_BYTES, defaultAttachmentCacheDir, defaultOpenPath, ensureAttachmentFile, openAttachmentFile } from './open-attachment.js'
 
 const provider = new DemoMailProvider()
 const allowedOrigin = process.env.DISPATCH_ALLOWED_ORIGIN ?? 'http://127.0.0.1:8410'
@@ -454,6 +455,26 @@ export function createMailServer(
       } catch (error) {
         return writeAttachmentError(response, 'gmail_attachment_read_failed', error)
       }
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/drafts/attachments/open') {
+      let body: Record<string, unknown> | undefined
+      try { body = draftObject(await readJson(request)) }
+      catch { return writeJson(response, 400, { error: 'invalid_json' }) }
+      const filename = body?.filename
+      const encoded = body?.contentBase64
+      if (typeof filename !== 'string' || typeof encoded !== 'string' || !encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+        return writeJson(response, 400, { error: 'invalid_draft_attachment' })
+      }
+      if (encoded.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4) return writeJson(response, 413, { error: 'attachment_too_large' })
+      const bytes = Buffer.from(encoded, 'base64')
+      if (!bytes.length || bytes.length > MAX_ATTACHMENT_BYTES || bytes.toString('base64') !== encoded) return writeJson(response, 400, { error: 'invalid_draft_attachment' })
+      try {
+        const opened = await openAttachmentFile({
+          messageId: 'local-draft', attachmentId: createHash('sha256').update(bytes).digest('hex'), filename,
+          loadPayload: async () => ({ data: encoded }), cacheDir: attachmentCacheDir, openPath,
+        })
+        return writeJson(response, 200, { opened: true, filename: opened.filename })
+      } catch (error) { return writeAttachmentError(response, 'draft_attachment_open_failed', error) }
     }
     if (request.method === 'POST' && url.pathname === '/v1/drafts/preview') {
       try {

@@ -12,7 +12,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))))
 })
 
-async function start() {
+async function start(options: Parameters<typeof createMailServer>[1] = {}) {
   const server = createMailServer({
     accounts: async () => [],
     listMessages: async () => [],
@@ -21,7 +21,7 @@ async function start() {
     listConversations: async () => [],
     listUnifiedConversations: async () => [],
     readConversation: async () => { throw new Error('not configured') },
-  }, { demoEnabled: true })
+  }, { demoEnabled: true, ...options })
   servers.push(server)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const port = (server.address() as AddressInfo).port
@@ -79,6 +79,24 @@ describe('dispatch-mail', () => {
     })
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({ bodyHtml: expect.stringContaining('<strong>Hi</strong>') })
+  })
+
+  it('opens local draft attachment bytes with the default file handler', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'dispatch-draft-open-'))
+    let openedPath = ''
+    const base = await start({ attachmentCacheDir: cacheDir, openPath: async (path) => { openedPath = path } })
+    const response = await fetch(`${base}/v1/drafts/attachments/open`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ filename: 'notes.txt', contentBase64: 'aGVsbG8=' }),
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ opened: true, filename: 'notes.txt' })
+    expect(await readFile(openedPath, 'utf8')).toBe('hello')
+    const invalid = await fetch(`${base}/v1/drafts/attachments/open`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ filename: 'notes.txt', contentBase64: 'not base64!' }),
+    })
+    expect(invalid.status).toBe(400)
   })
 
   it('discards a demo draft', async () => {

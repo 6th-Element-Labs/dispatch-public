@@ -1791,6 +1791,7 @@ test('marks a conversation selected before its full thread finishes loading', as
 
 test('forwards source message attachments and lists them on the draft', async ({ page }) => {
   let draftRequest: Record<string, unknown> | undefined
+  let opened: string | undefined
   await page.unroute('http://127.0.0.1:8411/v1/accounts')
   await page.unroute('http://127.0.0.1:8411/v1/drafts')
   await page.route('http://127.0.0.1:8411/v1/accounts', (route) => route.fulfill({ json: { accounts: [{ id: 'link-one', connectorId: 'gmail-app', name: 'Work', email: 'work@example.com' }] } }))
@@ -1802,14 +1803,23 @@ test('forwards source message attachments and lists them on the draft', async ({
     draftRequest = await route.request().postDataJSON() as Record<string, unknown>
     await route.fulfill({ status: 201, json: { draft: { id: 'fwd-1', inReplyToMessageId: '', to: [], cc: '', bcc: '', subject: 'Fwd: Opua berth confirmation', bodyMarkdown: '', bodyHtml: '<p></p>', bodyText: '', attachments: draftRequest.attachments, state: 'draft', accountId: 'link-one' } } })
   })
+  await page.route(/\/v1\/messages\/m1\/attachments\/a1\/open/, async (route) => {
+    opened = route.request().url()
+    await route.fulfill({ json: { opened: true, filename: 'arrival.pdf' } })
+  })
   await page.goto('/')
   await page.getByRole('button', { name: 'Forward' }).click()
   await expect.poll(() => draftRequest?.attachments).toEqual([{ ...attachment, sourceMessageId: 'm1' }])
   await expect(page.getByLabel('Draft attachments')).toContainText('arrival.pdf')
+  await page.getByRole('list', { name: 'Draft attachments' }).getByRole('button', { name: 'Preview arrival.pdf' }).click()
+  await expect(page.getByTitle('arrival.pdf')).toHaveAttribute('src', /\/v1\/messages\/m1\/attachments\/a1/)
+  await page.getByRole('button', { name: 'Open arrival.pdf' }).click()
+  await expect.poll(() => opened).toContain('/v1/messages/m1/attachments/a1/open')
 })
 
 test('attaches a local file to the open draft', async ({ page }) => {
   let saved: Record<string, unknown> | undefined
+  let opened: unknown
   await page.unroute('http://127.0.0.1:8411/v1/accounts')
   await page.unroute('http://127.0.0.1:8411/v1/drafts')
   await page.route('http://127.0.0.1:8411/v1/accounts', (route) => route.fulfill({ json: { accounts: [{ id: 'link-one', connectorId: 'gmail-app', name: 'Work', email: 'work@example.com' }] } }))
@@ -1817,11 +1827,17 @@ test('attaches a local file to the open draft', async ({ page }) => {
     saved = await route.request().postDataJSON() as Record<string, unknown>
     await route.fulfill({ status: 201, json: { draft: { id: 'attach-1', inReplyToMessageId: '', to: [], cc: '', bcc: '', subject: '', bodyMarkdown: '', bodyHtml: '<p></p>', bodyText: '', attachments: saved.attachments, state: 'draft', accountId: 'link-one' } } })
   })
+  await page.route('http://127.0.0.1:8411/v1/drafts/attachments/open', async (route) => {
+    opened = route.request().postDataJSON()
+    await route.fulfill({ json: { opened: true, filename: 'notes.txt' } })
+  })
   await page.goto('/')
   await page.getByRole('button', { name: 'Compose' }).click()
   await page.locator('[data-draft-files]').setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('hello') })
   await expect.poll(() => saved?.attachments).toEqual([expect.objectContaining({ name: 'notes.txt', mediaType: 'text/plain', contentBase64: 'aGVsbG8=' })])
   await expect(page.getByLabel('Draft attachments')).toContainText('notes.txt')
+  await page.getByRole('button', { name: 'Open notes.txt' }).click()
+  await expect.poll(() => opened).toEqual({ filename: 'notes.txt', contentBase64: 'aGVsbG8=' })
 })
 
 test('adds a recipient chip from mail autocomplete', async ({ page }) => {
@@ -1977,6 +1993,27 @@ test('marks unread from the thread context menu through the same read-state hand
   await page.goto('/')
   await chooseThreadMenu(page, 'Mark as Unread')
   await expect.poll(() => command).toEqual({ accountId: 'link-one', messageIds: ['m1'], unread: true })
+})
+
+test('keeps a manually unread thread unread when the same row is clicked again', async ({ page }) => {
+  await page.clock.install()
+  const summary = { ...conversations[0]!, accountId: 'link-one', accountLabel: 'work@example.com', unread: false }
+  await stubGmailInbox(page, summary)
+  const writes: unknown[] = []
+  await page.route('http://127.0.0.1:8411/v1/conversations/t1/read-state', async (route) => {
+    const body = route.request().postDataJSON()
+    writes.push(body)
+    await route.fulfill({ json: { accepted: true, result: { unread: (body as { unread: boolean }).unread } } })
+  })
+  await page.goto('/')
+  await page.locator('[data-conversation-id="demo:t1"]').click()
+  await page.getByRole('button', { name: 'Mark unread' }).click()
+  await expect(page.locator('[data-conversation-id="demo:t1"]')).toHaveClass(/dispatch-message-unread/)
+  await page.locator('[data-conversation-id="demo:t1"]').click()
+  await page.clock.fastForward(6_000)
+  await expect(page.locator('[data-conversation-id="demo:t1"]')).toHaveClass(/dispatch-message-unread/)
+  await expect(page.getByRole('button', { name: 'Mark read' })).toBeVisible()
+  expect(writes).toEqual([{ accountId: 'link-one', messageIds: ['m1'], unread: true }])
 })
 
 test('moves a conversation to Trash from the thread context menu', async ({ page }) => {

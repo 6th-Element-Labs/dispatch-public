@@ -429,6 +429,7 @@ let selection: SelectionState = EMPTY_SELECTION
 let readerNeedsRetry = false
 let selectionSequence = 0
 const markReadDwell = createMarkReadDwell()
+let manuallyUnreadConversationId: string | undefined
 let conversationLoadSequence = 0
 const conversationCache = new Map<string, Promise<ConversationProjection>>()
 const BINDING_CACHE = 'dispatch.codex.bindings.v1'
@@ -1069,6 +1070,7 @@ async function openAttachment(message: MessageProjection, attachmentId: string, 
 
 async function selectConversation(id: string, options: { revealOnMobile?: boolean; startReadDwell?: boolean; refresh?: boolean } = {}): Promise<void> {
   markReadDwell.cancel()
+  if (selectedConversationId !== id) manuallyUnreadConversationId = undefined
   const matchResult = searchView?.results.find(result => result.conversation.id === id)
   const summary = matchResult?.conversation ?? conversations.find((conversation) => conversation.id === id)
   if (!summary) return
@@ -1122,7 +1124,7 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
   elements.body.replaceChildren(loading)
   elements.attachments.replaceChildren()
   elements.threadFilesToggle.hidden = true
-  if (!offlineMode && options.startReadDwell && summary.unread && summary.accountId) {
+  if (!offlineMode && options.startReadDwell && summary.unread && summary.accountId && manuallyUnreadConversationId !== id) {
     const conversationId = summary.id
     markReadDwell.schedule(conversationId, () => { void completeReadDwell(conversationId) })
   }
@@ -1327,6 +1329,7 @@ async function applyReadState(nextUnread: boolean): Promise<void> {
   try {
     await api.setConversationUnread(selected.threadId, selected.accountId, nextUnread, selected.messages.map((message) => message.id))
     if (selectedConversationId !== conversationId) return
+    manuallyUnreadConversationId = nextUnread ? conversationId : undefined
     applyLocalReadState(conversationId, nextUnread)
   } catch (error) {
     renderReadState(selected.unread)
@@ -1547,13 +1550,83 @@ function onRecipientInput(input: HTMLInputElement): void {
   scheduleRecipientSuggestions(input)
 }
 
+const draftAttachmentObjectUrls = new Set<string>()
+
+function clearDraftAttachmentObjectUrls(): void {
+  for (const url of draftAttachmentObjectUrls) URL.revokeObjectURL(url)
+  draftAttachmentObjectUrls.clear()
+}
+
+function draftAttachmentFileUrl(draft: DraftProjection, attachment: DraftProjection['attachments'][number]): string | undefined {
+  if (attachment.contentBase64) {
+    const bytes = Uint8Array.from(atob(attachment.contentBase64), (char) => char.charCodeAt(0))
+    const url = URL.createObjectURL(new Blob([bytes], { type: attachment.mediaType }))
+    draftAttachmentObjectUrls.add(url)
+    return url
+  }
+  const messageId = attachment.sourceMessageId ?? draft.gmailMessageId
+  return messageId && attachment.id
+    ? api.attachmentFileUrl(messageId, attachment.id, draft.accountId, attachment.name)
+    : undefined
+}
+
+async function openDraftAttachment(draft: DraftProjection, attachment: DraftProjection['attachments'][number]): Promise<void> {
+  try {
+    if (attachment.contentBase64) await api.openLocalDraftAttachment(attachment.name, attachment.contentBase64)
+    else {
+      const messageId = attachment.sourceMessageId ?? draft.gmailMessageId
+      if (!messageId || !attachment.id) throw new Error('This attachment has no file identity. Reopen the draft and try again.')
+      await api.openAttachment(messageId, attachment.id, draft.accountId, attachment.name)
+    }
+  } catch (error) { draftError(error) }
+}
+
 function renderDraftAttachments(): void {
+  clearDraftAttachmentObjectUrls()
   const items = activeDraft?.attachments ?? []
   elements.draftAttachments.replaceChildren(...items.map((attachment, index) => {
     const row = document.createElement('li')
     row.className = 'dispatch-draft-attachment'
-    const name = document.createElement('strong')
-    name.textContent = attachment.name
+    const actions = document.createElement('div')
+    actions.className = 'dispatch-draft-attachment-actions'
+    const open = document.createElement('button')
+    open.type = 'button'
+    open.className = 'btn btn-sm btn-ghost-secondary dispatch-draft-attachment-open'
+    open.textContent = attachment.name
+    open.setAttribute('aria-label', `Open ${attachment.name}`)
+    const draft = activeDraft!
+    open.disabled = !attachment.contentBase64 && !(attachment.id && (attachment.sourceMessageId || draft.gmailMessageId))
+    open.addEventListener('click', () => { void openDraftAttachment(draft, attachment) })
+    actions.append(open)
+    if (attachment.mediaType.startsWith('image/') || attachment.mediaType === 'application/pdf') {
+      const fileUrl = draftAttachmentFileUrl(draft, attachment)
+      if (fileUrl) {
+        const preview = document.createElement('button')
+        preview.type = 'button'
+        preview.className = 'btn btn-sm btn-ghost-secondary'
+        preview.textContent = 'Preview'
+        preview.setAttribute('aria-label', `Preview ${attachment.name}`)
+        preview.setAttribute('aria-expanded', 'false')
+        const container = document.createElement('div')
+        container.className = 'dispatch-draft-attachment-preview'
+        preview.addEventListener('click', () => {
+          const expanded = preview.getAttribute('aria-expanded') === 'true'
+          container.replaceChildren()
+          if (!expanded) {
+            const content = attachment.mediaType === 'application/pdf' ? document.createElement('iframe') : document.createElement('img')
+            content.className = 'dispatch-attachment-frame'
+            content.src = fileUrl
+            if (content instanceof HTMLIFrameElement) content.title = attachment.name
+            else content.alt = attachment.name
+            container.append(content)
+          }
+          preview.setAttribute('aria-expanded', String(!expanded))
+          preview.textContent = expanded ? 'Preview' : 'Hide preview'
+        })
+        actions.append(preview)
+        row.append(container)
+      }
+    }
     const remove = document.createElement('button')
     remove.type = 'button'
     remove.className = 'btn btn-sm btn-ghost-secondary'
@@ -1565,7 +1638,8 @@ function renderDraftAttachments(): void {
       markDraftDirty()
       if (activeDraft.id) void saveDraft(false).catch(draftError)
     })
-    row.append(name, remove)
+    actions.append(remove)
+    row.prepend(actions)
     return row
   }))
   elements.draftAttachments.hidden = items.length === 0
@@ -1745,6 +1819,7 @@ function showDraft(draft: DraftProjection, accountMutable: boolean): void {
 }
 
 function hideDraftEditor(): void {
+  clearDraftAttachmentObjectUrls()
   if (draftPreviewTimer !== undefined) window.clearTimeout(draftPreviewTimer)
   if (draftAutosaveTimer !== undefined) window.clearTimeout(draftAutosaveTimer)
   draftPreviewTimer = undefined

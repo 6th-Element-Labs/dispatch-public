@@ -145,6 +145,21 @@ jobs:
             --target "${{ matrix.target }}" \
             --bundles app,dmg
 
+      - name: Verify the bundled Node JIT entitlement
+        run: |
+          set -euo pipefail
+          NODE="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/Dispatch.app/Contents/MacOS/node"
+          test -x "$NODE"
+          codesign --display --xml --entitlements "$RUNNER_TEMP/node-entitlements.plist" "$NODE"
+          python3 - <<'PY'
+          import os, plistlib
+          with open(os.path.join(os.environ['RUNNER_TEMP'], 'node-entitlements.plist'), 'rb') as stream:
+              entitlements = plistlib.load(stream)
+          if entitlements.get('com.apple.security.cs.allow-jit') is not True:
+              raise SystemExit('The signed Node sidecar is missing the JIT entitlement')
+          PY
+          "$NODE" -e 'console.log("Bundled Node can run JavaScript")'
+
       - name: Notarize and staple the outer DMG
         env:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}

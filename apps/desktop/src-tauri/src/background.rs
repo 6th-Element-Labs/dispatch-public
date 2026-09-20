@@ -141,6 +141,10 @@ fn needs_bootstrap(loaded: bool, health_runtime: Option<&str>, id: &str) -> bool
     !loaded || health_runtime != Some(id)
 }
 
+fn needs_runtime_drain(health_runtime: Option<&str>, id: &str) -> bool {
+    health_runtime.is_some_and(|current| current != id)
+}
+
 fn bootstrap(service: Service, path: &Path, id: &str) -> Result<(), String> {
     // bootout can return before launchd releases the old job's registration.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -161,8 +165,12 @@ pub fn start(resources: &Path, home: &Path, logs: &Path, codex: Option<&Path>) -
     let mut update = false;
     for service in Service::ALL {
         if loaded(service) {
-            let health = probe(service, "/health")?;
-            if health["runtimeId"] != id { update = true; }
+            // A launchd job can remain listed after its executable crashes.
+            // Let the bootstrap pass unload that silent job instead of making
+            // every subsequent app launch fail at this probe.
+            let health_runtime = probe(service, "/health").ok()
+                .and_then(|health| health["runtimeId"].as_str().map(str::to_owned));
+            if needs_runtime_drain(health_runtime.as_deref(), id) { update = true; }
         } else if !crate::preflight::open_ports(&[service.port()]).is_empty() {
             return Err(crate::preflight::describe_port_conflict(&[service.port()]));
         }
@@ -218,6 +226,8 @@ mod tests {
         assert!(needs_bootstrap(true, None, "abc"), "listed but silent: launchd is still tearing it down or it is crash-looping");
         assert!(needs_bootstrap(true, Some("old"), "abc"));
         assert!(!needs_bootstrap(true, Some("abc"), "abc"));
+        assert!(!needs_runtime_drain(None, "abc"), "a crashed job must be re-bootstrapped without draining healthy services");
+        assert!(needs_runtime_drain(Some("old"), "abc"));
     }
     #[test]
     fn labels_keep_mail_and_agent_as_independent_jobs() {
