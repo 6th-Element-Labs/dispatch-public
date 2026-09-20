@@ -1,6 +1,7 @@
 // Downloads the pinned Node runtime that Dispatch.app bundles as a Tauri sidecar.
 // The tarball must match both node-sidecar.json and nodejs.org's SHASUMS256.txt.
 import { createHash } from 'node:crypto'
+import { arch, platform } from 'node:process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -9,13 +10,15 @@ import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const pin = JSON.parse(readFileSync(join(root, 'node-sidecar.json'), 'utf8'))
-const platform = 'darwin-arm64'
-const triple = 'aarch64-apple-darwin'
+const architecture = `${platform}-${arch}`
+const triples = { 'darwin-arm64': 'aarch64-apple-darwin', 'darwin-x64': 'x86_64-apple-darwin' }
+const triple = triples[architecture]
+if (!triple) fail(`unsupported Node sidecar platform ${architecture}`)
 const version = pin.version
-const expected = pin.sha256[platform]
-if (!/^\d+\.\d+\.\d+$/.test(version) || !/^[0-9a-f]{64}$/.test(expected ?? '')) fail(`node-sidecar.json is missing a valid version or ${platform} sha256`)
+const expected = pin.sha256[architecture]
+if (!/^\d+\.\d+\.\d+$/.test(version) || !/^[0-9a-f]{64}$/.test(expected ?? '')) fail(`node-sidecar.json is missing a valid version or ${architecture} sha256`)
 
-const tarballName = `node-v${version}-${platform}.tar.gz`
+const tarballName = `node-v${version}-${architecture}.tar.gz`
 const base = `https://nodejs.org/dist/v${version}/`
 const target = join(root, 'src-tauri', 'binaries', `node-${triple}`)
 const marker = `${target}.sha256`
@@ -38,7 +41,7 @@ try {
   const archive = join(work, tarballName)
   writeFileSync(archive, tarball)
   execFileSync('tar', ['-xzf', archive, '-C', work])
-  const extracted = join(work, `node-v${version}-${platform}`, 'bin', 'node')
+  const extracted = join(work, `node-v${version}-${architecture}`, 'bin', 'node')
   if (!existsSync(extracted)) fail(`${tarballName} did not contain bin/node`)
   mkdirSync(dirname(target), { recursive: true })
   copyFileSync(extracted, target)

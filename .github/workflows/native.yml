@@ -54,7 +54,7 @@ jobs:
         run: npm --prefix apps/desktop run test:native
 
       - name: Build Dispatch.app
-        run: npm --prefix apps/desktop run build:native -- --bundles app
+        run: npm --prefix apps/desktop run build:native -- --config '{"bundle":{"createUpdaterArtifacts":false}}' --bundles app
 
       - name: Verify macOS deployment target
         run: |
