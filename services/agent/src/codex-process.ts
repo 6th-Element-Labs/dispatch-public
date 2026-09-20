@@ -75,7 +75,7 @@ export class CodexProcess {
     process.on('exit', (code, signal) => handleFailure(new Error(`Codex App Server exited (${code ?? signal ?? 'unknown'})`)))
     try {
       await rpc.request('initialize', {
-        clientInfo: { name: 'dispatch', title: 'Dispatch', version: '0.1.5' },
+        clientInfo: { name: 'dispatch', title: 'Dispatch', version: '0.1.6' },
         capabilities: { mcpServerOpenaiFormElicitation: true },
       })
     } catch (error) {

@@ -468,6 +468,36 @@ test('the rail and folder menu show unread and folder counts', async ({ page }) 
   await expect(rail.locator('[data-mailbox-count="spam"]')).toBeHidden()
 })
 
+test('Dock badge shows unread Inbox conversations across all accounts', async ({ page }) => {
+  await page.addInitScript(() => {
+    const win = window as Window & {
+      dockBadges?: Array<number | undefined>
+      __TAURI__?: { window: { getCurrentWindow(): { setBadgeCount(count?: number): Promise<void> } } }
+    }
+    win.dockBadges = []
+    win.__TAURI__ = { window: { getCurrentWindow: () => ({ setBadgeCount: async count => { win.dockBadges!.push(count) } }) } }
+  })
+  await page.unroute('http://127.0.0.1:8411/v1/accounts')
+  await page.route('http://127.0.0.1:8411/v1/accounts', route => route.fulfill({ json: { accounts: [{ id: 'link-one', connectorId: 'gmail-app', name: 'Work', email: 'work@example.com' }] } }))
+  await page.unroute(/8411\/v1\/mailboxes\/counts/)
+  let globalUnread = 7
+  let accountUnread = 2
+  await page.route(/8411\/v1\/mailboxes\/counts/, route => {
+    const scoped = new URL(route.request().url()).searchParams.get('account') === 'link-one'
+    return route.fulfill({ json: { source: 'gmail', counts: { inbox: scoped ? accountUnread : globalUnread, drafts: 0, spam: 0 } } })
+  })
+  await page.goto('/')
+  const badgeCalls = () => page.evaluate(() => JSON.stringify((window as Window & { dockBadges?: Array<number | undefined> }).dockBadges))
+  await expect.poll(badgeCalls).toContain('7')
+  await page.locator('[data-account]').selectOption('link-one')
+  await expect(page.locator('.dispatch-rail [data-mailbox-count="inbox"]')).toHaveText('2')
+  await expect.poll(badgeCalls).toMatch(/7\]$/)
+  globalUnread = 0
+  accountUnread = 0
+  await page.locator('[data-refresh]').click()
+  await expect.poll(badgeCalls).toMatch(/null\]$/)
+})
+
 test('single-letter shortcuts act on the selected conversation and G chords switch folders', async ({ page }) => {
   const fixture = gmailInbox(page, 3)
   await routeGmailInbox(page, fixture)
@@ -912,6 +942,33 @@ test('updates read state only after the Gmail command is accepted', async ({ pag
   await page.getByRole('button', { name: 'Mark read' }).click()
   await expect.poll(() => command).toEqual({ accountId: 'link-one', messageIds: ['m1'], unread: false })
   await expect(page.getByRole('button', { name: 'Mark unread' })).toBeVisible()
+})
+
+test('Dock badge follows accepted Mark Unread and Mark Read commands', async ({ page }) => {
+  await page.addInitScript(() => {
+    const win = window as Window & {
+      dockBadges?: Array<number | undefined>
+      __TAURI__?: { window: { getCurrentWindow(): { setBadgeCount(count?: number): Promise<void> } } }
+    }
+    win.dockBadges = []
+    win.__TAURI__ = { window: { getCurrentWindow: () => ({ setBadgeCount: async count => { win.dockBadges!.push(count) } }) } }
+  })
+  const summary = { ...conversations[0]!, accountId: 'link-one', accountLabel: 'work@example.com', unread: false }
+  await stubGmailInbox(page, summary)
+  await page.unroute(/8411\/v1\/mailboxes\/counts/)
+  let unread = 0
+  await page.route(/8411\/v1\/mailboxes\/counts/, route => route.fulfill({ json: { source: 'gmail', counts: { inbox: unread, drafts: 0, spam: 0 } } }))
+  await page.route('http://127.0.0.1:8411/v1/conversations/t1/read-state', async route => {
+    unread = (route.request().postDataJSON() as { unread: boolean }).unread ? 1 : 0
+    await route.fulfill({ json: { accepted: true, result: { unread: unread > 0 } } })
+  })
+  await page.goto('/')
+  await page.locator('[data-conversation-id="demo:t1"]').click()
+  const badgeCalls = () => page.evaluate(() => JSON.stringify((window as Window & { dockBadges?: Array<number | undefined> }).dockBadges))
+  await page.getByRole('button', { name: 'Mark unread' }).click()
+  await expect.poll(badgeCalls).toMatch(/1\]$/)
+  await page.getByRole('button', { name: 'Mark read' }).click()
+  await expect.poll(badgeCalls).toMatch(/null\]$/)
 })
 
 test('marks an unread Gmail conversation read after a 5 second selection dwell', async ({ page }) => {

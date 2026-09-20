@@ -18,6 +18,8 @@ The middle reading surface is visually primary. Selection of a Gmail conversatio
 
 All connected Gmail accounts enter one date-ordered queue by default. The user can filter that queue to one account. Message rows show a compact date and time. The rendered message header shows the full date and time.
 
+The macOS Dock icon shows the total number of unread Inbox conversations across all connected accounts. An account filter changes the visible mailbox counts, but not the Dock total. The badge disappears when that total is zero.
+
 The queue contains conversations, not duplicate individual messages. A conversation is scoped by Gmail account and Gmail thread ID. Inbox contains only Gmail INBOX members, excluding drafts, spam and trash. All, Unread, and Read filter conversations within the selected mailbox. Unread archived mail remains in Archive and never enters Inbox merely because it is unread.
 
 Selecting a conversation loads the complete Gmail thread with the newest message first. The reader shows the subject on its own row, then the action buttons. A long subject stays on one line and uses an ellipsis. Each message shows sender, address, full date, and time. Repeated quoted history is collapsed by default but remains available through a disclosure.

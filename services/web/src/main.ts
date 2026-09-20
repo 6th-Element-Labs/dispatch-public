@@ -1284,6 +1284,7 @@ function applyLocalReadState(conversationId: string, unread: boolean): void {
     .filter((conversation) => mailState === 'all' || (mailState === 'unread' ? conversation.unread : !conversation.unread))
   if (selectedConversationId === conversationId) renderReadState(unread)
   renderList()
+  void refreshMailboxCounts()
 }
 
 function dropConversationCache(conversationId: string): void {
@@ -3299,6 +3300,13 @@ function syncTime(value: string | null): string {
 
 let mailboxCountsFlight: Promise<void> | undefined
 
+function setDockUnreadBadge(count: number): void {
+  const tauri = (window as { __TAURI__?: { window?: { getCurrentWindow(): { setBadgeCount(count?: number): Promise<void> } } } }).__TAURI__
+  const nativeWindow = tauri?.window?.getCurrentWindow()
+  if (!nativeWindow) return
+  void nativeWindow.setBadgeCount(count > 0 ? count : undefined).catch(error => console.warn('Could not update Dock unread badge', error))
+}
+
 function renderMailboxCounts(counts: MailboxCounts): void {
   for (const [name, value] of Object.entries(counts) as Array<[keyof MailboxCounts, number]>) {
     app.querySelectorAll<HTMLElement>(`[data-mailbox-count="${name}"]`).forEach((badge) => {
@@ -3312,7 +3320,15 @@ function renderMailboxCounts(counts: MailboxCounts): void {
 async function refreshMailboxCounts(): Promise<void> {
   if (offlineMode || mailboxCountsFlight) return
   mailboxCountsFlight = (async () => {
-    try { renderMailboxCounts(await api.mailboxCounts(selectedAccountId)) } catch { /* the badges keep their last value until the next poll */ }
+    try {
+      const nativeBadge = Boolean((window as { __TAURI__?: { window?: unknown } }).__TAURI__?.window)
+      const [counts, allCounts] = await Promise.all([
+        api.mailboxCounts(selectedAccountId),
+        selectedAccountId && nativeBadge ? api.mailboxCounts() : Promise.resolve(undefined),
+      ])
+      renderMailboxCounts(counts)
+      setDockUnreadBadge((allCounts ?? counts).inbox)
+    } catch { /* the badges keep their last value until the next poll */ }
   })().finally(() => { mailboxCountsFlight = undefined })
   await mailboxCountsFlight
 }

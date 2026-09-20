@@ -31,7 +31,7 @@ Do not set `dangerousInsecureTransportProtocol` in the production config.
 Run this on both Apple Silicon and Intel Macs. Record redacted evidence in the private release checklist. Do not commit keys, passwords, or real mail.
 
 1. Build and install `0.1.0`.
-2. Build `0.1.5`.
+2. Build `0.1.6`.
 3. Create a test `latest.json` with `darwin-aarch64` and `darwin-x86_64` entries.
 4. Serve it over local HTTPS or a controlled GitHub draft asset.
 5. Use a test-only Tauri config overlay for the endpoint.
