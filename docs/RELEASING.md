@@ -56,7 +56,7 @@ The workflow creates a draft release. It does not publish it.
 
 ## Draft acceptance
 
-Download the draft DMG and `SHA256SUMS.txt`, then verify:
+Download both draft DMGs and `SHA256SUMS.txt`. Verify the checksum of each DMG, updater archive, signature, and `latest.json`, then check each mounted app:
 
 ```bash
 shasum -a 256 -c SHA256SUMS.txt
@@ -65,7 +65,7 @@ spctl --assess --type execute /Volumes/Dispatch/Dispatch.app
 xcrun stapler validate /Volumes/Dispatch/Dispatch.app
 ```
 
-On a clean Apple Silicon Mac running macOS 14 or later:
+On clean Apple Silicon and Intel Macs running macOS 14 or later, test each matching DMG:
 
 1. Mount the DMG.
 2. Copy Dispatch to Applications.

@@ -105,18 +105,23 @@ export function reachableCargoPackageIds(metadata) {
 }
 
 async function cargoPackages() {
-  const { stdout } = await execute('cargo', [
-    'metadata',
-    '--format-version=1',
-    '--filter-platform',
-    'aarch64-apple-darwin',
-    '--manifest-path',
-    'apps/desktop/src-tauri/Cargo.toml',
-  ], { cwd: root, maxBuffer: 32 * 1024 * 1024 })
-  const metadata = JSON.parse(stdout)
-  const shipped = reachableCargoPackageIds(metadata)
-  return metadata.packages
-    .filter(record => shipped.has(record.id))
+  const packages = new Map()
+  for (const platform of ['aarch64-apple-darwin', 'x86_64-apple-darwin']) {
+    const { stdout } = await execute('cargo', [
+      'metadata',
+      '--format-version=1',
+      '--filter-platform',
+      platform,
+      '--manifest-path',
+      'apps/desktop/src-tauri/Cargo.toml',
+    ], { cwd: root, maxBuffer: 32 * 1024 * 1024 })
+    const metadata = JSON.parse(stdout)
+    const shipped = reachableCargoPackageIds(metadata)
+    for (const record of metadata.packages) {
+      if (shipped.has(record.id)) packages.set(record.id, record)
+    }
+  }
+  return [...packages.values()]
     .map(record => ({
       ecosystem: 'cargo',
       name: record.name,

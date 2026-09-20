@@ -28,11 +28,11 @@ Do not set `dangerousInsecureTransportProtocol` in the production config.
 
 ## Two-version acceptance
 
-Record redacted evidence in the private release checklist. Do not commit keys, passwords, or real mail.
+Run this on both Apple Silicon and Intel Macs. Record redacted evidence in the private release checklist. Do not commit keys, passwords, or real mail.
 
 1. Build and install `0.1.0`.
 2. Build `0.1.1`.
-3. Create a test `latest.json` with only `darwin-aarch64`.
+3. Create a test `latest.json` with `darwin-aarch64` and `darwin-x86_64` entries.
 4. Serve it over local HTTPS or a controlled GitHub draft asset.
 5. Use a test-only Tauri config overlay for the endpoint.
 6. Verify **Download** and **Not Now**.

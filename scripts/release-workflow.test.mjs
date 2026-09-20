@@ -15,7 +15,7 @@ async function readPublicFile(templatePath, exportedPath) {
 }
 
 describe('public release workflow', () => {
-  it('gates a signed Apple Silicon draft release', async () => {
+  it('gates a signed Apple Silicon and Intel draft release', async () => {
     const workflow = await readPublicFile(
       'deploy/public/.github/workflows/release.yml',
       '.github/workflows/release.yml',
@@ -24,17 +24,22 @@ describe('public release workflow', () => {
       "tags: ['v*']",
       'environment: release',
       'aarch64-apple-darwin',
+      'x86_64-apple-darwin',
+      'macos-15-intel',
       'MACOSX_DEPLOYMENT_TARGET: "14.0"',
       'APPLE_CERTIFICATE',
       'APPLE_API_ISSUER',
       'node scripts/version-contract.mjs --expect "$VERSION"',
-      'rm -rf apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle',
+      'needs: [verify, macos-build]',
+      'test -s "release/Dispatch_${VERSION}_${ARCH}.dmg"',
       'gh release create "$GITHUB_REF_NAME"',
       '--draft',
       'release:verify',
       'release:verify-updater',
-      'release:checksums',
+      'write-sha256sums.mjs',
       'TAURI_SIGNING_PRIVATE_KEY',
+      '--url-intel',
+      '--sig-intel',
       'latest.json',
     ]) {
       assert.match(workflow, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))

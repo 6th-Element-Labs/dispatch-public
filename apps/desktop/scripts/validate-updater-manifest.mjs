@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url'
 
 const SIGNATURE_PREFIX = 'untrusted comment:'
 const ARCHIVE_SUFFIX = '.app.tar.gz'
-const PLATFORM = 'darwin-aarch64'
+const ARM_PLATFORM = 'darwin-aarch64'
+const INTEL_PLATFORM = 'darwin-x86_64'
 
 export function githubReleaseAssetUrl(url) {
   try {
@@ -20,13 +21,17 @@ export function githubReleaseAssetUrl(url) {
   }
 }
 
-export function buildManifest({ version, notes = '', pubDate, url, signature }) {
+export function buildManifest({ version, notes = '', pubDate, url, signature, intelUrl, intelSignature }) {
+  if (Boolean(intelUrl) !== Boolean(intelSignature)) {
+    throw new Error('Intel updater URL and signature must be provided together')
+  }
   return {
     version,
     notes,
     pub_date: pubDate,
     platforms: {
-      [PLATFORM]: { url, signature },
+      [ARM_PLATFORM]: { url, signature },
+      ...(intelUrl ? { [INTEL_PLATFORM]: { url: intelUrl, signature: intelSignature } } : {}),
     },
   }
 }
@@ -39,45 +44,51 @@ export async function validateManifest(manifest, { version, assetsDir, read } = 
   const platforms = manifest.platforms
   if (!platforms || typeof platforms !== 'object') throw new Error('updater manifest is missing platforms')
   const names = Object.keys(platforms)
-  if (!names.includes(PLATFORM)) throw new Error(`updater manifest is missing ${PLATFORM}`)
-  if (names.length !== 1) throw new Error(`updater manifest has extra platforms: ${names.join(', ')}`)
-
-  const platform = platforms[PLATFORM]
-  if (!platform?.url || !githubReleaseAssetUrl(platform.url)) {
-    throw new Error('updater platform URL must be an HTTPS GitHub release asset')
-  }
-  if (!platform.url.endsWith(ARCHIVE_SUFFIX)) {
-    throw new Error(`updater platform URL must end with ${ARCHIVE_SUFFIX}`)
-  }
-  if (typeof platform.signature !== 'string' || !platform.signature.startsWith(SIGNATURE_PREFIX)) {
-    throw new Error('updater signature must be minisign text, not a URL or path')
-  }
-  if (/^https?:\/\//.test(platform.signature) || platform.signature.includes('/') || platform.signature.includes('\\')) {
-    throw new Error('updater signature must be minisign text, not a URL or path')
+  if (!names.includes(ARM_PLATFORM)) throw new Error(`updater manifest is missing ${ARM_PLATFORM}`)
+  if (names.some(name => name !== ARM_PLATFORM && name !== INTEL_PLATFORM)) {
+    throw new Error(`updater manifest has extra platforms: ${names.join(', ')}`)
   }
 
-  const archiveName = basename(new URL(platform.url).pathname)
-  const archive = resolve(assetsDir, archiveName)
-  const signatureFile = `${archive}.sig`
-  const readFileAt = read ?? (path => readFile(path, 'utf8'))
-  let archiveBytes
-  try {
-    archiveBytes = await (read ? read(archive) : readFile(archive))
-  } catch {
-    throw new Error(`updater archive is missing: ${archiveName}`)
+  const verified = {}
+  for (const name of names) {
+    const platform = platforms[name]
+    if (!platform?.url || !githubReleaseAssetUrl(platform.url)) {
+      throw new Error(`${name} updater URL must be an HTTPS GitHub release asset`)
+    }
+    if (!platform.url.endsWith(ARCHIVE_SUFFIX)) {
+      throw new Error(`${name} updater URL must end with ${ARCHIVE_SUFFIX}`)
+    }
+    if (typeof platform.signature !== 'string' || !platform.signature.startsWith(SIGNATURE_PREFIX)) {
+      throw new Error(`${name} updater signature must be minisign text, not a URL or path`)
+    }
+    if (/^https?:\/\//.test(platform.signature) || platform.signature.includes('/') || platform.signature.includes('\\')) {
+      throw new Error(`${name} updater signature must be minisign text, not a URL or path`)
+    }
+
+    const archiveName = basename(new URL(platform.url).pathname)
+    const archive = resolve(assetsDir, archiveName)
+    const signatureFile = `${archive}.sig`
+    const readFileAt = read ?? (path => readFile(path, 'utf8'))
+    let archiveBytes
+    try {
+      archiveBytes = await (read ? read(archive) : readFile(archive))
+    } catch {
+      throw new Error(`updater archive is missing: ${archiveName}`)
+    }
+    if (!archiveBytes || archiveBytes.length === 0) {
+      throw new Error(`updater archive is missing: ${archiveName}`)
+    }
+    const localSignature = await readFileAt(signatureFile)
+    if (localSignature !== platform.signature) {
+      throw new Error(`${name} updater signature does not match the complete local .sig file`)
+    }
+    verified[name] = { archive, signatureFile, platform }
   }
-  if (!archiveBytes || (typeof archiveBytes === 'string' ? archiveBytes.length === 0 : archiveBytes.length === 0)) {
-    throw new Error(`updater archive is missing: ${archiveName}`)
-  }
-  const localSignature = await readFileAt(signatureFile)
-  if (localSignature !== platform.signature) {
-    throw new Error('updater signature does not match the complete local .sig file')
-  }
-  return { archive, signatureFile, platform }
+  return verified
 }
 
-export async function writeManifest({ output, version, notes, url, signature, pubDate = new Date().toISOString() }) {
-  const manifest = buildManifest({ version, notes, pubDate, url, signature })
+export async function writeManifest({ output, version, notes, url, signature, intelUrl, intelSignature, pubDate = new Date().toISOString() }) {
+  const manifest = buildManifest({ version, notes, pubDate, url, signature, intelUrl, intelSignature })
   await writeFile(output, `${JSON.stringify(manifest, null, 2)}\n`)
   return manifest
 }
@@ -95,12 +106,18 @@ async function main() {
     const output = option('--output')
     const url = option('--url')
     const sigPath = option('--sig')
+    const intelUrl = option('--url-intel')
+    const intelSigPath = option('--sig-intel')
     const notes = option('--notes') ?? ''
     if (!output || !url || !sigPath) {
       throw new Error('Use --write --output latest.json --url <https github asset> --sig <file>')
     }
     const signature = await readFile(resolve(sigPath), 'utf8')
-    await writeManifest({ output: resolve(output), version, notes, url, signature })
+    if (Boolean(intelUrl) !== Boolean(intelSigPath)) {
+      throw new Error('Use --url-intel and --sig-intel together')
+    }
+    const intelSignature = intelSigPath ? await readFile(resolve(intelSigPath), 'utf8') : undefined
+    await writeManifest({ output: resolve(output), version, notes, url, signature, intelUrl, intelSignature })
     process.stdout.write(`Wrote ${output}\n`)
     return
   }

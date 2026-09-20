@@ -12,6 +12,8 @@ import {
 const SIGNATURE = 'untrusted comment: minisign signature\nRWTestSignatureLine\n'
 const ARCHIVE = 'Dispatch.app.tar.gz'
 const URL = `https://github.com/6th-Element-Labs/dispatch-public/releases/download/v0.1.0/${ARCHIVE}`
+const INTEL_ARCHIVE = 'Dispatch-Intel.app.tar.gz'
+const INTEL_URL = `https://github.com/6th-Element-Labs/dispatch-public/releases/download/v0.1.0/${INTEL_ARCHIVE}`
 
 function validManifest(overrides = {}) {
   return {
@@ -37,6 +39,31 @@ describe('updater manifest validation', () => {
       assert.ok(manifest.platforms['darwin-aarch64'])
       assert.match(manifest.platforms['darwin-aarch64'].signature, /^untrusted comment:/)
       assert.ok(manifest.platforms['darwin-aarch64'].url.endsWith('.app.tar.gz'))
+      await validateManifest(manifest, { version: '0.1.0', assetsDir: directory })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('requires both local archives and signatures for a two-platform release', async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), 'dispatch-updater-dual-'))
+    try {
+      await writeFile(resolve(directory, ARCHIVE), 'arm archive')
+      await writeFile(resolve(directory, `${ARCHIVE}.sig`), SIGNATURE)
+      await writeFile(resolve(directory, INTEL_ARCHIVE), 'intel archive')
+      const manifest = buildManifest({
+        version: '0.1.0',
+        url: URL,
+        signature: SIGNATURE,
+        intelUrl: INTEL_URL,
+        intelSignature: SIGNATURE,
+      })
+      assert.deepEqual(Object.keys(manifest.platforms).sort(), ['darwin-aarch64', 'darwin-x86_64'])
+      await assert.rejects(
+        validateManifest(manifest, { version: '0.1.0', assetsDir: directory }),
+        /ENOENT|signature/,
+      )
+      await writeFile(resolve(directory, `${INTEL_ARCHIVE}.sig`), SIGNATURE)
       await validateManifest(manifest, { version: '0.1.0', assetsDir: directory })
     } finally {
       await rm(directory, { recursive: true, force: true })

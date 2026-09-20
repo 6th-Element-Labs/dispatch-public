@@ -5,12 +5,13 @@ Codex in one window.
 
 ![Dispatch with synthetic mail](docs/assets/dispatch-screenshot.png)
 
-## Download for Apple Silicon
+## Download for Mac
 
 Download the latest signed DMG from
 [GitHub Releases](https://github.com/6th-Element-Labs/dispatch-public/releases/latest).
+Choose `arm64` for Apple Silicon or `x86_64` for an Intel Mac.
 
-Requirements: Apple Silicon, macOS 14 or later, and an installed Codex CLI or
+Requirements: macOS 14 or later, and an installed Codex CLI or
 current ChatGPT desktop app.
 
 ## First run

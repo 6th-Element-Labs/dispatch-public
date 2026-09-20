@@ -64,3 +64,60 @@ jobs:
 
       - name: Start the bundled services with the bundled Node
         run: npm --prefix apps/desktop run smoke
+
+  macos-intel:
+    name: public-ci/macos-intel
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/src-tauri/target
+          key: public-macos-intel-cargo-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: public-macos-intel-cargo-
+
+      - name: Install workspace dependencies
+        run: |
+          set -euo pipefail
+          for dir in services/web services/mail services/agent apps/desktop; do
+            npm --prefix "$dir" ci --prefer-offline --no-audit --no-fund
+          done
+
+      - name: Fetch the pinned Intel Node sidecar
+        run: |
+          test "$(uname -m)" = x86_64
+          npm --prefix apps/desktop run fetch-node
+
+      - name: Stage the web client and services
+        run: npm --prefix apps/desktop run stage
+
+      - name: Rust unit tests
+        run: npm --prefix apps/desktop run test:native
+
+      - name: Build Intel Dispatch.app without an updater signature
+        run: npm --prefix apps/desktop run build:native -- --target x86_64-apple-darwin --config '{"bundle":{"createUpdaterArtifacts":false}}' --bundles app
+
+      - name: Verify the Intel app and bundled services
+        run: |
+          set -euo pipefail
+          APP="apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Dispatch.app"
+          value="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist")"
+          test "$value" = "14.0"
+          test "$(lipo -archs "$APP/Contents/MacOS/dispatch")" = x86_64
+          test "$(lipo -archs "$APP/Contents/MacOS/node")" = x86_64
+          npm --prefix apps/desktop run smoke -- "$(pwd)/$APP"
