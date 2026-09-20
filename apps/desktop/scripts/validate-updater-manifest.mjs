@@ -21,6 +21,14 @@ export function githubReleaseAssetUrl(url) {
   }
 }
 
+export function encodedMinisignSignature(value) {
+  if (typeof value !== 'string') return false
+  const encoded = value.trim()
+  if (!encoded || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return false
+  const decoded = Buffer.from(encoded, 'base64')
+  return decoded.toString('base64') === encoded && decoded.toString('utf8').startsWith(SIGNATURE_PREFIX)
+}
+
 export function buildManifest({ version, notes = '', pubDate, url, signature, intelUrl, intelSignature }) {
   if (Boolean(intelUrl) !== Boolean(intelSignature)) {
     throw new Error('Intel updater URL and signature must be provided together')
@@ -58,11 +66,8 @@ export async function validateManifest(manifest, { version, assetsDir, read } = 
     if (!platform.url.endsWith(ARCHIVE_SUFFIX)) {
       throw new Error(`${name} updater URL must end with ${ARCHIVE_SUFFIX}`)
     }
-    if (typeof platform.signature !== 'string' || !platform.signature.startsWith(SIGNATURE_PREFIX)) {
-      throw new Error(`${name} updater signature must be minisign text, not a URL or path`)
-    }
-    if (/^https?:\/\//.test(platform.signature) || platform.signature.includes('/') || platform.signature.includes('\\')) {
-      throw new Error(`${name} updater signature must be minisign text, not a URL or path`)
+    if (!encodedMinisignSignature(platform.signature)) {
+      throw new Error(`${name} updater signature must be base64-encoded minisign text, not a URL or path`)
     }
 
     const archiveName = basename(new URL(platform.url).pathname)

@@ -5,11 +5,12 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import {
   buildManifest,
+  encodedMinisignSignature,
   githubReleaseAssetUrl,
   validateManifest,
 } from './validate-updater-manifest.mjs'
 
-const SIGNATURE = 'untrusted comment: minisign signature\nRWTestSignatureLine\n'
+const SIGNATURE = Buffer.from('untrusted comment: minisign signature\nRWTestSignatureLine\n').toString('base64')
 const ARCHIVE = 'Dispatch.app.tar.gz'
 const URL = `https://github.com/6th-Element-Labs/dispatch-public/releases/download/v0.1.0/${ARCHIVE}`
 const INTEL_ARCHIVE = 'Dispatch-Intel.app.tar.gz'
@@ -37,7 +38,7 @@ describe('updater manifest validation', () => {
       const manifest = validManifest()
       assert.equal(manifest.version, '0.1.0')
       assert.ok(manifest.platforms['darwin-aarch64'])
-      assert.match(manifest.platforms['darwin-aarch64'].signature, /^untrusted comment:/)
+      assert.equal(encodedMinisignSignature(manifest.platforms['darwin-aarch64'].signature), true)
       assert.ok(manifest.platforms['darwin-aarch64'].url.endsWith('.app.tar.gz'))
       await validateManifest(manifest, { version: '0.1.0', assetsDir: directory })
     } finally {
@@ -99,6 +100,12 @@ describe('updater manifest validation', () => {
           platforms: { 'darwin-aarch64': { url: URL, signature: '/tmp/Dispatch.app.tar.gz.sig' } },
         }), { version: '0.1.0', assetsDir: directory }),
         /minisign text/,
+      )
+      await assert.rejects(
+        validateManifest(validManifest({
+          platforms: { 'darwin-aarch64': { url: URL, signature: 'untrusted comment: raw minisign text' } },
+        }), { version: '0.1.0', assetsDir: directory }),
+        /base64-encoded minisign text/,
       )
     } finally {
       await rm(directory, { recursive: true, force: true })
