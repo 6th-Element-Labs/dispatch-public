@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window renders the Dispatch web client and may drag or zoom its own native window. Sidecar spawning, dialogs, and log reveal are done from Rust; the page receives no shell, filesystem, dialog, or opener permission.",
+  "description": "The main window renders the Dispatch web client, may drag or zoom its own native window, and may open a conversation in a message window. Sidecar spawning, dialogs, and log reveal are done from Rust; the page receives no shell, filesystem, dialog, or opener permission.",
   "windows": [
     "main"
   ],
@@ -12,6 +12,7 @@
     "core:window:allow-set-badge-count",
     "allow-popup-context-menu",
     "allow-open-web-link",
-    "allow-set-appearance"
+    "allow-set-appearance",
+    "allow-open-message-window"
   ]
 }

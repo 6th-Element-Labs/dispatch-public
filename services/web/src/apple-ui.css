@@ -21,7 +21,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 .dispatch-message-account { color: var(--tblr-secondary-color); font-size: 11px; }
 .dispatch-compact .dispatch-message { grid-template-columns: minmax(0,1fr); padding: 10px 12px; gap: 0; }
 .dispatch-compact .dispatch-message > .avatar { display: none; }
-.dispatch-compact .dispatch-message:not(.dispatch-search-match) small { display: none; }
+/* A local draft keeps its sync state even in the compact list. */
+.dispatch-compact .dispatch-message:not(.dispatch-search-match):not(.dispatch-local-draft) small { display: none; }
 .dispatch-compact .dispatch-message b { -webkit-line-clamp: 1; font-size: 13px; }
 .dispatch-compact .dispatch-message-unread .dispatch-message-top strong::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--tblr-primary); }
 .dispatch-reader-header { padding: 18px 22px 14px; }

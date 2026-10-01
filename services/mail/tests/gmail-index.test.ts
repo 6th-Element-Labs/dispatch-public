@@ -268,15 +268,15 @@ describe('GmailIndex reconcileStream', () => {
       message('d2', false, false, { inDrafts: true }),
       message('m1', true, true),
     ], 'run-1', false)
-    expect(index.reconcileStream('account-1', 'drafts', ['d2'], 'run-2')).toEqual({ cleared: 1, removed: 1 })
+    expect(index.reconcileStream('account-1', 'drafts', ['d2'], 'run-2')).toEqual({ cleared: 1, removed: 1, conflicts: 0 })
     expect(index.mailboxConversations('drafts', 'all', 'account-1').map((conversation) => conversation.latestMessageId)).toEqual(['d2'])
     expect(index.messages('account-1').map((item) => item.id).sort()).toEqual(['d2', 'm1'])
-    expect(index.reconcileStream('account-1', 'unread', [], 'run-2')).toEqual({ cleared: 1, removed: 0 })
+    expect(index.reconcileStream('account-1', 'unread', [], 'run-2')).toEqual({ cleared: 1, removed: 0, conflicts: 0 })
     expect(index.messages('account-1').find((item) => item.id === 'm1')?.unread).toBe(false)
-    expect(index.reconcileStream('account-1', 'inbox', ['m1'], 'run-2')).toEqual({ cleared: 0, removed: 0 })
-    // Rows upserted by the current run are never reconciled away.
+    expect(index.reconcileStream('account-1', 'inbox', ['m1'], 'run-2')).toEqual({ cleared: 0, removed: 0, conflicts: 0 })
+    // Rows upserted by the current run are never reconciled away; one the list omits is a conflict.
     index.replaceAccount('account-1', [message('d3', false, false, { inDrafts: true })], 'run-3', false)
-    expect(index.reconcileStream('account-1', 'drafts', [], 'run-3')).toEqual({ cleared: 1, removed: 1 })
+    expect(index.reconcileStream('account-1', 'drafts', [], 'run-3')).toEqual({ cleared: 1, removed: 1, conflicts: 1 })
     expect(index.messages('account-1').map((item) => item.id).sort()).toEqual(['d3', 'm1'])
   })
 })

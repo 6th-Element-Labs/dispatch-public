@@ -20,6 +20,12 @@ if (!skipBuild) {
   execFileSync('npx', ['tauri', 'build', '--bundles', 'app'], { cwd: desktop, stdio: 'inherit' })
 }
 if (!existsSync(join(built, 'Contents', 'MacOS', 'dispatch'))) fail(`${built} is missing; build first`)
+// A local build has no signing identity, so its bundle is left unsealed and macOS cannot tie the
+// running app to its bundle: the Dock shows a blank icon. Seal it ad hoc; a signed build passes as is.
+if (spawnSync('codesign', ['--verify', '--strict', built], { stdio: 'ignore' }).status !== 0) {
+  console.log('install-app: signing the local build ad hoc')
+  execFileSync('codesign', ['--force', '--sign', '-', built], { stdio: 'inherit' })
+}
 
 console.log('install-app: quitting the running Dispatch')
 spawnSync('osascript', ['-e', 'tell application "Dispatch" to quit'], { stdio: 'ignore' })
@@ -30,6 +36,10 @@ console.log(`install-app: replacing ${installed}`)
 rmSync(installed, { recursive: true, force: true })
 execFileSync('ditto', [built, installed], { stdio: 'inherit' })
 execFileSync('xattr', ['-dr', 'com.apple.quarantine', installed], { stdio: 'ignore' })
+// Leave LaunchServices one Dispatch to resolve: the installed copy, not the build output.
+const lsregister = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
+spawnSync(lsregister, ['-u', built], { stdio: 'ignore' })
+execFileSync(lsregister, ['-f', installed], { stdio: 'inherit' })
 console.log('install-app: launching')
 execFileSync('open', ['-a', installed], { stdio: 'inherit' })
 console.log(`install-app: ${installed} is the running build`)

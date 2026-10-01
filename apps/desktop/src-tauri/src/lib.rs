@@ -8,6 +8,7 @@ mod appearance;
 mod codex_path;
 mod context_menu;
 mod menu;
+mod message_windows;
 mod preflight;
 mod sidecars;
 mod background;
@@ -16,7 +17,7 @@ mod web_links;
 
 use std::path::PathBuf;
 
-use tauri::{AppHandle, Manager, RunEvent, Runtime};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
@@ -38,7 +39,8 @@ pub fn run() {
         .manage(appearance::AppearanceMenu::<tauri::Wry>::default())
         .manage(updater::UpdateCoordinator::default())
         .manage(web_links::WebLinks::default())
-        .invoke_handler(tauri::generate_handler![context_menu::popup_context_menu, web_links::open_web_link, web_links::web_link_state, web_links::web_link_action, appearance::set_appearance])
+        .manage(message_windows::MessageWindows::default())
+        .invoke_handler(tauri::generate_handler![context_menu::popup_context_menu, web_links::open_web_link, web_links::web_link_state, web_links::web_link_action, appearance::set_appearance, message_windows::open_message_window])
         .setup(|app| {
             let handle = app.handle().clone();
             let resources = handle.path().resource_dir()?;
@@ -78,6 +80,7 @@ pub fn run() {
             updater::spawn_post_launch_check(handle.clone());
 
             web_links::create_mail_window(&handle)?;
+            message_windows::close_with_main(&handle);
             handle.set_menu(menu::build(&handle)?)?;
             handle.on_menu_event(|app, event| match event.id().as_ref() {
                 menu::RESTART_SERVICES => {
@@ -94,6 +97,7 @@ pub fn run() {
                     }
                 }
                 menu::RETURN_TO_MAIL => web_links::return_to_mail(app),
+                menu::OPEN_MESSAGE_WINDOW => { let _ = app.emit_to("main", message_windows::OPEN_SELECTED, ()); }
                 appearance::SYSTEM | appearance::LIGHT | appearance::DARK => {
                     if let Err(message) = appearance::choose(app, event.id().as_ref()) {
                         show_error(app, "Dispatch could not change its appearance", &message);

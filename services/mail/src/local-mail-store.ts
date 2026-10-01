@@ -1,7 +1,10 @@
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { plainBodyFromMessage } from './draft.js'
 import type { ConversationProjection, DraftProjection } from './model.js'
+import type { DraftSaveJob } from './draft-save-queue.js'
 
 export interface ReceiptDetails { to: string[]; cc: string[]; bcc: string[]; subject: string; attachments: { name: string; mediaType: string; sizeLabel?: string }[] }
 export interface SendReceipt {
@@ -12,6 +15,7 @@ export interface SendReceipt {
   error?: string; warnings?: string[]
 }
 export interface OfflineDownload { id: string; state: 'running' | 'complete' | 'partial' | 'cancelled' | 'interrupted'; mailbox: string; accountId?: string; total: number; completed: number; errors: string[]; startedAt: string }
+export interface DraftConflictCopy { id: string; accountId: string; draftId: string; local: DraftProjection; remote: DraftProjection; choice: 'keep-local' | 'use-remote'; createdAt: string }
 
 /** Mail alone owns downloaded message bodies and provider send receipts. */
 export class LocalMailStore {
@@ -26,12 +30,46 @@ export class LocalMailStore {
       CREATE INDEX IF NOT EXISTS receipt_message ON receipts(account_id,message_id);
       CREATE TABLE IF NOT EXISTS local_state(key TEXT PRIMARY KEY,payload TEXT NOT NULL);`)
     this.#db.exec('CREATE TABLE IF NOT EXISTS saved_drafts(account_id TEXT NOT NULL, draft_id TEXT NOT NULL, thread_id TEXT, message_id TEXT, confirmed_at TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(account_id,draft_id))')
+    this.#db.exec('CREATE TABLE IF NOT EXISTS draft_saves(account_id TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(account_id,id))')
+    this.#db.exec('CREATE TABLE IF NOT EXISTS draft_conflict_copies(id TEXT PRIMARY KEY, account_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)')
+    this.#db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS downloaded_search USING fts5(account_id UNINDEXED,message_id UNINDEXED,thread_id UNINDEXED,text,tokenize='unicode61')")
+    if (!this.#db.prepare("SELECT key FROM local_state WHERE key='downloaded-search-v1'").get()) {
+      this.#db.exec('BEGIN IMMEDIATE')
+      try {
+        for (const row of this.#db.prepare('SELECT payload FROM conversations').all()) this.#indexConversation(JSON.parse(String(row.payload)))
+        this.#db.prepare('INSERT INTO local_state VALUES(?,?)').run('downloaded-search-v1', '1')
+        this.#db.exec('COMMIT')
+      } catch (error) { this.#db.exec('ROLLBACK'); throw error }
+    }
     for (const receipt of this.#db.prepare("SELECT payload FROM receipts WHERE status IN ('sending','preparing')").all().map(row => JSON.parse(String(row.payload)) as SendReceipt)) if (receipt.status === 'sending') this.putReceipt({ ...receipt, status: 'unknown', error: 'Dispatch restarted before the send response arrived. Check Sent before retrying.' })
     for (const receipt of this.#db.prepare("SELECT payload FROM receipts WHERE status IN ('sending','preparing')").all().map(row => JSON.parse(String(row.payload)) as SendReceipt)) if (receipt.status === 'preparing') this.putReceipt({ ...receipt, status: 'failed', error: 'Dispatch stopped before issuing the send.' })
     const job = this.download()
     if (job?.state === 'running') this.putDownload({ ...job, state: 'interrupted' })
   }
   close(): void { this.#db.close() }
+  draftSave(accountId: string, id: string): DraftSaveJob | undefined {
+    const row = this.#db.prepare('SELECT payload FROM draft_saves WHERE account_id=? AND id=?').get(accountId, id)
+    return row ? JSON.parse(String(row.payload)) : undefined
+  }
+  draftSaves(): DraftSaveJob[] { return this.#db.prepare('SELECT payload FROM draft_saves ORDER BY rowid').all().map(row => JSON.parse(String(row.payload))) }
+  putDraftSave(job: DraftSaveJob): void { this.#db.prepare('INSERT OR REPLACE INTO draft_saves VALUES(?,?,?)').run(job.accountId, job.id, JSON.stringify(job)) }
+  putConflictCopy(accountId: string, draftId: string, local: DraftProjection, remote: DraftProjection, choice: 'keep-local' | 'use-remote'): string {
+    const id = randomUUID()
+    const copy: DraftConflictCopy = { id, accountId, draftId, local, remote, choice, createdAt: new Date().toISOString() }
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      this.#db.prepare('INSERT INTO draft_conflict_copies VALUES(?,?,?,?)').run(id, accountId, copy.createdAt, JSON.stringify(copy))
+      // Active conflicts remain in their queue records; retain the latest 100 resolved copies per account.
+      this.#db.prepare('DELETE FROM draft_conflict_copies WHERE account_id=? AND id NOT IN (SELECT id FROM draft_conflict_copies WHERE account_id=? ORDER BY created_at DESC,rowid DESC LIMIT 100)').run(accountId, accountId)
+      this.#db.exec('COMMIT')
+    } catch (error) { this.#db.exec('ROLLBACK'); throw error }
+    return id
+  }
+  conflictCopies(accountId?: string): DraftConflictCopy[] {
+    const rows = accountId ? this.#db.prepare('SELECT payload FROM draft_conflict_copies WHERE account_id=? ORDER BY created_at DESC,rowid DESC LIMIT 100').all(accountId)
+      : this.#db.prepare('SELECT payload FROM draft_conflict_copies ORDER BY created_at DESC,rowid DESC LIMIT 100').all()
+    return rows.map(row => JSON.parse(String(row.payload)))
+  }
   putDraft(draft: DraftProjection): void {
     if (!draft.accountId || !draft.id) return
     const { cachedAt: _cached, ...saved } = draft
@@ -69,8 +107,29 @@ export class LocalMailStore {
     if (!conversation.accountId) throw new Error('A downloaded conversation requires an account')
     const cachedAt = new Date().toISOString()
     const { availability: _availability, ...payload } = conversation
-    this.#db.prepare('INSERT OR REPLACE INTO conversations VALUES(?,?,?,?)').run(conversation.accountId, conversation.threadId, cachedAt, JSON.stringify(payload))
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      this.#db.prepare('INSERT OR REPLACE INTO conversations VALUES(?,?,?,?)').run(conversation.accountId, conversation.threadId, cachedAt, JSON.stringify(payload))
+      this.#indexConversation(conversation)
+      this.#db.exec('COMMIT')
+    } catch (error) { this.#db.exec('ROLLBACK'); throw error }
     return cachedAt
+  }
+  #indexConversation(conversation: ConversationProjection): void {
+    this.#db.prepare('DELETE FROM downloaded_search WHERE account_id=? AND thread_id=?').run(conversation.accountId!, conversation.threadId)
+    const insert = this.#db.prepare('INSERT INTO downloaded_search(account_id,message_id,thread_id,text) VALUES(?,?,?,?)')
+    for (const message of conversation.messages) {
+      const headers = [message.subject, message.preview, message.sender.name, message.sender.address, ...(message.to ?? []).map(item => item.address)].join(' ')
+      insert.run(conversation.accountId!, message.id, conversation.threadId, `${headers}\n${plainBodyFromMessage(message)}`)
+    }
+  }
+  searchCachedMessageIds(terms: readonly string[], accountId?: string): Set<string> {
+    if (!terms.length) return new Set()
+    // Treat the user's terms as literal phrases, not FTS query syntax.
+    const match = terms.map(term => `"${term.replaceAll('"', '""')}"`).join(' AND ')
+    const rows = accountId ? this.#db.prepare('SELECT account_id,message_id FROM downloaded_search WHERE downloaded_search MATCH ? AND account_id=?').all(match, accountId)
+      : this.#db.prepare('SELECT account_id,message_id FROM downloaded_search WHERE downloaded_search MATCH ?').all(match)
+    return new Set(rows.map(row => `${row.account_id}:${row.message_id}`))
   }
   conversation(accountId: string, threadId: string): { conversation: ConversationProjection; cachedAt: string } | undefined {
     const row = this.#db.prepare('SELECT payload,cached_at FROM conversations WHERE account_id=? AND thread_id=?').get(accountId, threadId)
@@ -82,7 +141,10 @@ export class LocalMailStore {
     return { conversations: Number(row.count), bytes: Number(row.bytes) }
   }
   pruneAccounts(ids: readonly string[]): void {
-    for (const row of this.#db.prepare('SELECT DISTINCT account_id FROM conversations').all()) if (!ids.includes(String(row.account_id))) this.#db.prepare('DELETE FROM conversations WHERE account_id=?').run(row.account_id!)
+    for (const row of this.#db.prepare('SELECT DISTINCT account_id FROM conversations').all()) if (!ids.includes(String(row.account_id))) {
+      this.#db.prepare('DELETE FROM conversations WHERE account_id=?').run(row.account_id!)
+      this.#db.prepare('DELETE FROM downloaded_search WHERE account_id=?').run(row.account_id!)
+    }
   }
   putReceipt(receipt: SendReceipt): void {
     this.#db.prepare('INSERT OR REPLACE INTO receipts VALUES(?,?,?,?,?,?,?)').run(receipt.id, receipt.accountId, receipt.draftId ?? null, receipt.messageId ?? null, receipt.status, receipt.requestedAt, JSON.stringify(receipt))

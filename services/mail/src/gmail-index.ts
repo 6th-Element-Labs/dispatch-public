@@ -110,12 +110,12 @@ function folderMember(message: IndexedGmailMessage, mailbox: Exclude<GmailMailbo
 }
 
 function filterSearch(messages: readonly IndexedGmailMessage[], query: string): IndexedGmailMessage[] {
-  const terms = query.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((term) => term.replace(/^"|"$/g, '')) ?? []
+  const terms = query.match(/(?:[^\s"]|"[^"]*")+/g)?.map((term) => term.replace(/^"|"$/g, '')) ?? []
   let filtered = [...messages]
   for (const term of terms) {
     const separator = term.indexOf(':')
     const field = separator > 0 ? term.slice(0, separator).toLowerCase() : ''
-    const value = separator > 0 ? term.slice(separator + 1).toLowerCase() : term.toLowerCase()
+    const value = (separator > 0 ? term.slice(separator + 1) : term).replace(/^"|"$/g, '').toLowerCase()
     if (field === 'from') filtered = filtered.filter((message) => `${message.sender.name} ${message.sender.address}`.toLowerCase().includes(value))
     else if (field === 'subject') filtered = filtered.filter((message) => message.subject.toLowerCase().includes(value))
     else if (field === 'is' && value === 'unread') filtered = filtered.filter((message) => message.unread)
@@ -150,6 +150,10 @@ export class GmailIndex {
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
       CREATE TABLE IF NOT EXISTS gmail_action_overlay (key TEXT PRIMARY KEY, action TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS gmail_history_checkpoint (account_id TEXT PRIMARY KEY, email TEXT NOT NULL, history_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS gmail_history_baseline (account_id TEXT PRIMARY KEY, email TEXT NOT NULL, history_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS gmail_history_baseline_rows (account_id TEXT NOT NULL, id TEXT NOT NULL, ready INTEGER NOT NULL DEFAULT 0, payload TEXT, PRIMARY KEY(account_id,id));
+      CREATE TABLE IF NOT EXISTS gmail_direct_sync_disabled (account_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS gmail_unread_overlay (key TEXT PRIMARY KEY, unread INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS gmail_action_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, payload TEXT NOT NULL, error TEXT);
       CREATE TABLE IF NOT EXISTS gmail_messages (
@@ -205,7 +209,73 @@ export class GmailIndex {
     for (const row of this.#db.prepare('SELECT CAST(key AS BLOB) AS key,unread FROM gmail_unread_overlay').all()) this.#acceptedUnread.set(Buffer.from(row.key as Uint8Array).toString(), row.unread === 1)
   }
 
-  replaceAccount(accountId: string, messages: readonly IndexedGmailMessage[], runId: string, complete: boolean): void {
+  historyCheckpoint(accountId: string, email: string): string | undefined {
+    const row = this.#db.prepare('SELECT email, history_id FROM gmail_history_checkpoint WHERE account_id=?').get(accountId);
+    return row && String(row.email).toLowerCase() === email.toLowerCase() ? String(row.history_id) : undefined
+  }
+  directSyncDisabled(accountId: string): boolean { return !!this.#db.prepare('SELECT 1 FROM gmail_direct_sync_disabled WHERE account_id=?').get(accountId) }
+  setDirectSyncEnabled(accountId: string, enabled: boolean): void {
+    if (enabled) this.#db.prepare('DELETE FROM gmail_direct_sync_disabled WHERE account_id=?').run(accountId)
+    else this.#db.prepare('INSERT OR IGNORE INTO gmail_direct_sync_disabled VALUES (?)').run(accountId)
+  }
+
+  /** Private staging is resumable; it never changes visible mail or the published checkpoint. */
+  historyBaseline(accountId: string, email: string): { historyId: string; pending: string[]; messages: IndexedGmailMessage[]; deleted: string[] } | undefined {
+    const header = this.#db.prepare('SELECT email,history_id FROM gmail_history_baseline WHERE account_id=?').get(accountId)
+    if (!header || String(header.email).toLowerCase() !== email.toLowerCase()) return undefined
+    const result = { historyId: String(header.history_id), pending: [] as string[], messages: [] as IndexedGmailMessage[], deleted: [] as string[] }
+    for (const row of this.#db.prepare('SELECT id,ready,payload FROM gmail_history_baseline_rows WHERE account_id=? ORDER BY rowid').all(accountId)) {
+      if (!row.ready) result.pending.push(String(row.id))
+      else if (row.payload === null) result.deleted.push(String(row.id))
+      else {
+        const message = JSON.parse(String(row.payload)) as IndexedGmailMessage
+        if (message.id !== row.id || message.accountId !== accountId) throw new Error('Invalid staged Gmail message identity')
+        result.messages.push(message)
+      }
+    }
+    return result
+  }
+  beginHistoryBaseline(accountId: string, email: string, historyId: string, ids: ReadonlySet<string>): void {
+    if (!email || !/^[1-9]\d*$/.test(historyId)) throw new Error('Invalid Gmail baseline identity')
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      this.#clearHistoryBaseline(accountId)
+      this.#db.prepare('INSERT INTO gmail_history_baseline VALUES (?,?,?)').run(accountId, email.toLowerCase(), historyId)
+      const insert = this.#db.prepare('INSERT INTO gmail_history_baseline_rows(account_id,id) VALUES (?,?)')
+      for (const id of ids) insert.run(accountId, id)
+      this.#db.exec('COMMIT')
+    } catch (error) { this.#db.exec('ROLLBACK'); throw error }
+  }
+  stageHistoryBaseline(accountId: string, messages: readonly IndexedGmailMessage[], deleted: readonly string[]): void {
+    if (messages.some(message => message.accountId !== accountId)) throw new Error('Gmail baseline contains another account')
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const update = this.#db.prepare('UPDATE gmail_history_baseline_rows SET ready=1,payload=? WHERE account_id=? AND id=?')
+      for (const message of messages) if (update.run(JSON.stringify(message), accountId, message.id).changes !== 1) throw new Error('Unlisted Gmail baseline message')
+      for (const id of deleted) if (update.run(null, accountId, id).changes !== 1) throw new Error('Unlisted Gmail baseline deletion')
+      this.#db.exec('COMMIT')
+    } catch (error) { this.#db.exec('ROLLBACK'); throw error }
+  }
+  clearHistoryBaseline(accountId: string): void {
+    this.#db.exec('BEGIN IMMEDIATE')
+    try { this.#clearHistoryBaseline(accountId); this.#db.exec('COMMIT') }
+    catch (error) { this.#db.exec('ROLLBACK'); throw error }
+  }
+  #clearHistoryBaseline(accountId: string): void {
+    this.#db.prepare('DELETE FROM gmail_history_baseline_rows WHERE account_id=?').run(accountId)
+    this.#db.prepare('DELETE FROM gmail_history_baseline WHERE account_id=?').run(accountId)
+  }
+
+  /** Rows, confirmed deletions, overlays, and the next checkpoint are one durable commit. */
+  applyHistory(accountId: string, email: string, messages: readonly IndexedGmailMessage[], deletedIds: readonly string[], historyId: string, complete = false): void {
+    if (!email || !/^[1-9]\d*$/.test(historyId)) throw new Error('Invalid Gmail history checkpoint')
+    if (messages.some(message => message.accountId !== accountId)) throw new Error('Gmail history contains another account')
+    this.replaceAccount(accountId, messages, `history:${historyId}`, complete, { email, historyId, deletedIds })
+  }
+
+  replaceAccount(accountId: string, messages: readonly IndexedGmailMessage[], runId: string, complete: boolean, history?: { email: string; historyId: string; deletedIds: readonly string[] }): void {
+    const unreadBefore = new Map(this.#acceptedUnread)
+    const actionsBefore = new Map(this.#acceptedActions)
     this.#db.exec('BEGIN IMMEDIATE')
     try {
       const upsert = this.#db.prepare(`
@@ -237,9 +307,30 @@ export class GmailIndex {
       if (complete) this.#db.prepare('DELETE FROM gmail_messages WHERE account_id = ? AND sync_run_id <> ? AND NOT EXISTS (SELECT 1 FROM gmail_action_overlay WHERE key=account_id || char(0) || id) AND NOT EXISTS (SELECT 1 FROM gmail_unread_overlay WHERE key=account_id || char(0) || id)').run(accountId, runId)
       this.#reapplyAcceptedUnread(accountId, messages)
       this.#reapplyAcceptedActions(accountId, messages)
+      if (history) {
+        const deleted = new Set(history.deletedIds)
+        // A Gmail-confirmed permanent deletion cannot be replayed as a local label action.
+        for (const job of this.pendingActions().filter(job => job.accountId === accountId)) {
+          const remaining = job.messageIds.filter(id => !deleted.has(id))
+          if (remaining.length === job.messageIds.length) continue
+          if (!remaining.length) this.finishAction(job.id)
+          else this.#db.prepare('UPDATE gmail_action_queue SET payload=? WHERE id=?').run(JSON.stringify({ messageIds: remaining, action: job.action }), job.id)
+        }
+        for (const id of history.deletedIds) {
+          this.#db.prepare('DELETE FROM gmail_messages WHERE account_id=? AND id=?').run(accountId, id)
+          const key = `${accountId}\0${id}`
+          this.#db.prepare('DELETE FROM gmail_unread_overlay WHERE key=?').run(key)
+          this.#db.prepare('DELETE FROM gmail_action_overlay WHERE key=?').run(key)
+          this.#acceptedUnread.delete(key); this.#acceptedActions.delete(key)
+        }
+        this.#db.prepare('INSERT OR REPLACE INTO gmail_history_checkpoint VALUES (?,?,?)').run(accountId, history.email.toLowerCase(), history.historyId)
+        if (complete) this.#clearHistoryBaseline(accountId)
+      }
       this.#db.exec('COMMIT')
     } catch (error) {
       this.#db.exec('ROLLBACK')
+      this.#acceptedUnread.clear(); unreadBefore.forEach((value, key) => this.#acceptedUnread.set(key, value))
+      this.#acceptedActions.clear(); actionsBefore.forEach((value, key) => this.#acceptedActions.set(key, value))
       throw error
     }
   }
@@ -253,37 +344,116 @@ export class GmailIndex {
    * upserted (any stream) are never touched here: their flags already came
    * from Gmail's labels.
    */
-  reconcileStream(accountId: string, flag: IndexStreamFlag, presentIds: readonly string[], runId: string): { cleared: number; removed: number } {
+  reconcileStream(
+    accountId: string, flag: IndexStreamFlag, presentIds: readonly string[], runId: string,
+    window: { floor?: string | null; scope?: IndexStreamFlag; remove?: boolean } = {},
+  ): { cleared: number; removed: number; conflicts: number } {
+    // `scope` limits the judgement to rows in that folder. `remove: false` keeps rows left in no
+    // folder for the caller to remove once every folder has been seen. A row this run read in
+    // detail but the list omits is a conflict (it changed in between): left as read, and counted.
     const column = STREAM_COLUMNS[flag]
     const present = new Set(presentIds)
-    const rows = this.#db.prepare(`SELECT id FROM gmail_messages WHERE account_id = ? AND ${column} = 1 AND sync_run_id <> ?`).all(accountId, runId) as unknown as Array<{ id: string }>
-    const stale = rows.map((row) => row.id).filter((id) => !present.has(id))
-    if (stale.length === 0) return { cleared: 0, removed: 0 }
+    const rows = this.#db.prepare(`SELECT id, sync_run_id FROM gmail_messages WHERE account_id = ? AND ${column} = 1${window.scope ? ` AND ${STREAM_COLUMNS[window.scope]} = 1` : ''}`)
+      .all(accountId) as unknown as Array<{ id: string; sync_run_id: string }>
+    const absent = rows.filter((row) => !present.has(row.id))
+    const conflicts = absent.filter((row) => row.sync_run_id === runId).length
+    const stale = absent.filter((row) => row.sync_run_id !== runId).map((row) => row.id)
+    if (stale.length === 0) return { cleared: 0, removed: 0, conflicts }
     const clear = this.#db.prepare(`UPDATE gmail_messages SET ${column} = 0 WHERE account_id = ? AND id = ?`)
     const remove = this.#db.prepare(`
       DELETE FROM gmail_messages WHERE account_id = ? AND id = ?
         AND in_inbox = 0 AND in_sent = 0 AND in_drafts = 0 AND in_spam = 0 AND in_trash = 0 AND in_archive = 0`)
+    let cleared = 0
     let removed = 0
     this.#db.exec('BEGIN IMMEDIATE')
     try {
       for (const id of stale) {
         if (this.#acceptedActions.has(`${accountId}\0${id}`)) continue
         if (flag === 'unread' && this.#acceptedUnread.has(`${accountId}\0${id}`)) continue
-        clear.run(accountId, id)
-        removed += Number(remove.run(accountId, id).changes)
+        cleared += Number(clear.run(accountId, id).changes)
+        if (window.remove !== false) removed += Number(remove.run(accountId, id).changes)
       }
       this.#db.exec('COMMIT')
     } catch (error) {
       this.#db.exec('ROLLBACK')
       throw error
     }
-    return { cleared: stale.length, removed }
+    return { cleared, removed, conflicts }
+  }
+
+  /**
+   * Clears `flag` on these messages (they left a folder's first page), within `scope`. Rows with a
+   * local change awaiting Gmail keep their state; rows this run read in detail are conflicts.
+   */
+  clearFlagFor(accountId: string, flag: IndexStreamFlag, messageIds: readonly string[], runId: string, scope?: IndexStreamFlag): { cleared: number; conflicts: number } {
+    const rows = this.rowsByIds(accountId, messageIds)
+    const column = STREAM_COLUMNS[flag]
+    const runOf = this.#db.prepare('SELECT sync_run_id FROM gmail_messages WHERE account_id = ? AND id = ?')
+    const clear = this.#db.prepare(`UPDATE gmail_messages SET ${column} = 0 WHERE account_id = ? AND id = ?`)
+    let cleared = 0
+    let conflicts = 0
+    for (const id of messageIds) {
+      const row = rows.get(id)
+      if (!row?.flags[flag] || (scope && !row.flags[scope]) || row.pending) continue
+      if ((runOf.get(accountId, id) as { sync_run_id: string }).sync_run_id === runId) { conflicts++; continue }
+      cleared += Number(clear.run(accountId, id).changes)
+    }
+    return { cleared, conflicts }
+  }
+
+  /** Forgets messages Gmail says it no longer has: their rows and any local change waiting on them. */
+  forgetMessages(accountId: string, messageIds: readonly string[]): void {
+    const remove = this.#db.prepare('DELETE FROM gmail_messages WHERE account_id = ? AND id = ?')
+    const unread = this.#db.prepare('DELETE FROM gmail_unread_overlay WHERE key = ?')
+    const action = this.#db.prepare('DELETE FROM gmail_action_overlay WHERE key = ?')
+    for (const id of messageIds) {
+      const key = `${accountId}\0${id}`
+      remove.run(accountId, id); unread.run(key); action.run(key)
+      this.#acceptedUnread.delete(key); this.#acceptedActions.delete(key)
+    }
+  }
+
+  /** Deletes rows left in no folder (gone from Gmail), except those with a local change awaiting Gmail. */
+  removeFolderless(accountId: string): number {
+    const rows = this.#db.prepare('SELECT id FROM gmail_messages WHERE account_id = ? AND in_inbox = 0 AND in_sent = 0 AND in_drafts = 0 AND in_spam = 0 AND in_trash = 0 AND in_archive = 0')
+      .all(accountId) as unknown as Array<{ id: string }>
+    const remove = this.#db.prepare('DELETE FROM gmail_messages WHERE account_id = ? AND id = ?')
+    let removed = 0
+    for (const { id } of rows) {
+      const key = `${accountId}\0${id}`
+      if (this.#acceptedActions.has(key) || this.#acceptedUnread.has(key)) continue
+      removed += Number(remove.run(accountId, id).changes)
+    }
+    return removed
+  }
+
+  /** What the index holds for these messages: folder flags, date, and whether a local change awaits Gmail. */
+  rowsByIds(accountId: string, ids: readonly string[]): Map<string, { flags: Record<IndexStreamFlag, boolean>; receivedAt: string; pending: boolean }> {
+    const found = new Map<string, { flags: Record<IndexStreamFlag, boolean>; receivedAt: string; pending: boolean }>()
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500)
+      const rows = this.#db.prepare(`SELECT id, received_at, in_inbox, unread, in_sent, in_drafts, in_spam, in_trash, in_archive FROM gmail_messages WHERE account_id = ? AND id IN (${chunk.map(() => '?').join(', ')})`)
+        .all(accountId, ...chunk) as unknown as Array<Record<string, string | number>>
+      for (const row of rows) {
+        const key = `${accountId}\0${row.id}`
+        found.set(String(row.id), {
+          receivedAt: String(row.received_at),
+          pending: this.#acceptedActions.has(key) || this.#acceptedUnread.has(key),
+          flags: { inbox: row.in_inbox === 1, unread: row.unread === 1, sent: row.in_sent === 1, drafts: row.in_drafts === 1, spam: row.in_spam === 1, trash: row.in_trash === 1, archive: row.in_archive === 1 },
+        })
+      }
+    }
+    return found
   }
 
   pruneAccounts(accountIds: readonly string[]): void {
     if (accountIds.length === 0) throw new Error('Cannot prune Gmail index without an authoritative account list')
     const placeholders = accountIds.map(() => '?').join(', ')
     this.#db.prepare(`DELETE FROM gmail_messages WHERE account_id NOT IN (${placeholders})`).run(...accountIds)
+    this.#db.prepare(`DELETE FROM gmail_history_checkpoint WHERE account_id NOT IN (${placeholders})`).run(...accountIds)
+    this.#db.prepare(`DELETE FROM gmail_direct_sync_disabled WHERE account_id NOT IN (${placeholders})`).run(...accountIds)
+    this.#db.prepare(`DELETE FROM gmail_history_baseline WHERE account_id NOT IN (${placeholders})`).run(...accountIds)
+    this.#db.prepare(`DELETE FROM gmail_history_baseline_rows WHERE account_id NOT IN (${placeholders})`).run(...accountIds)
   }
 
   replaceAccounts(accounts: readonly IndexedGmailAccount[], seenAt: string): void {
@@ -336,6 +506,14 @@ export class GmailIndex {
       inTrash: row.in_trash === 1,
       hasAttachment: row.has_attachment === 1,
     }))
+  }
+
+  /** The folders (not Unread) that hold any of these messages. */
+  foldersOf(accountId: string, messageIds: readonly string[]): IndexStreamFlag[] {
+    if (messageIds.length === 0) return []
+    const placeholders = messageIds.map(() => '?').join(', ')
+    const row = this.#db.prepare(`SELECT MAX(in_inbox) AS inbox, MAX(in_sent) AS sent, MAX(in_drafts) AS drafts, MAX(in_spam) AS spam, MAX(in_trash) AS trash, MAX(in_archive) AS archive FROM gmail_messages WHERE account_id = ? AND id IN (${placeholders})`).get(accountId, ...messageIds) as Record<string, number | null> | undefined
+    return (['inbox', 'sent', 'drafts', 'spam', 'trash', 'archive'] as const).filter(flag => row?.[flag] === 1)
   }
 
   threadMessageIds(accountId: string, threadId: string): readonly string[] {
@@ -526,6 +704,15 @@ export class GmailIndex {
     )
   }
 
+  searchDownloadedConversations(mailbox: GmailMailbox, query: string, state: MailStateFilter, bodyHits: ReadonlySet<string>, accountId?: string): readonly ConversationSummary[] {
+    const terms = query.match(/(?:[^\s"]|"[^"]*")+/g) ?? []
+    const filters = terms.filter(term => /^[^:]+:/.test(term)).join(' ')
+    const freeText = terms.filter(term => !/^[^:]+:/.test(term)).join(' ')
+    const eligible = filterSearch(this.messages(accountId), filters).filter(message => mailbox === 'inbox' ? queueEligible(message, state) : folderMember(message, mailbox))
+    const metadataHits = new Set(filterSearch(eligible, freeText).map(message => `${message.accountId}:${message.id}`))
+    return groupConversations(eligible.filter(message => !freeText || metadataHits.has(`${message.accountId}:${message.id}`) || bodyHits.has(`${message.accountId}:${message.id}`)), state)
+  }
+
   mailboxCounts(accountId?: string): MailboxCounts {
     const inbox = new Set<string>()
     const drafts = new Set<string>()
@@ -539,8 +726,11 @@ export class GmailIndex {
     return { inbox: inbox.size, drafts: drafts.size, spam: spam.size }
   }
 
-  count(): number {
-    return Number((this.#db.prepare('SELECT COUNT(*) AS count FROM gmail_messages').get() as { count: number | bigint }).count)
+  count(accountId?: string): number {
+    const row = accountId
+      ? this.#db.prepare('SELECT COUNT(*) AS count FROM gmail_messages WHERE account_id = ?').get(accountId)
+      : this.#db.prepare('SELECT COUNT(*) AS count FROM gmail_messages').get()
+    return Number((row as { count: number | bigint }).count)
   }
 
   beginSync(startedAt: string): void {

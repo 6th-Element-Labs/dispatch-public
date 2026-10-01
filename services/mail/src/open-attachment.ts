@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { mkdir, stat, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join, resolve, sep } from 'node:path'
 
 export interface EnsureAttachmentInput {
+  readonly accountId: string
   readonly messageId: string
   readonly attachmentId: string
   readonly filename: string
@@ -77,10 +78,10 @@ export async function resolveAttachmentBytes(payload: unknown, download: (url: s
   const failure = connectorFailure(payload)
   if (failure) throw new Error(`Gmail connector could not read the attachment: ${failure}`)
   const inline = inlineAttachmentBytes(payload)
-  if (inline) return inline
-  const url = attachmentDownloadUrl(payload)
-  if (!url) throw new Error('Gmail attachment response did not contain downloadable bytes')
-  const bytes = await download(url)
+  const url = inline === undefined ? attachmentDownloadUrl(payload) : undefined
+  if (inline === undefined && !url) throw new Error('Gmail attachment response did not contain downloadable bytes')
+  const bytes = inline ?? await download(url!)
+  if (bytes.length > MAX_ATTACHMENT_BYTES) throw new Error(`Attachment exceeds ${MAX_ATTACHMENT_BYTES} bytes`)
   const expected = expectedAttachmentSize(payload)
   if (expected !== undefined && expected !== bytes.length) {
     throw new Error(`Gmail attachment download returned ${bytes.length} bytes, expected ${expected}`)
@@ -114,34 +115,88 @@ function expectedAttachmentSize(payload: unknown): number | undefined {
   return typeof size === 'number' && Number.isInteger(size) && size >= 0 ? size : undefined
 }
 
-/**
- * Returns the attachment as a file in the cache, downloading it once. A file
- * already on disk is reused as-is: attachment ids are stable per message, so
- * the connector round trip (about two seconds, it also extracts text) is paid
- * only the first time.
- */
+const cacheFlights = new Map<string, Promise<CachedAttachment>>()
+const digest = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
+const identitySegment = (value: string) => `${safeId(value).slice(0, 24)}-${digest(value)}`
+interface CacheManifest { version: 2; accountId: string; messageId: string; attachmentId: string; filename: string; mediaType: string; bytes: number; sha256: string }
+
+/** Account identity and a verified manifest are required even when Gmail is offline. */
 export async function ensureAttachmentFile(input: EnsureAttachmentInput): Promise<CachedAttachment> {
+  if (!input.accountId || !input.messageId || !input.attachmentId) throw new Error('Account, message and attachment identities are required')
   const filename = safeAttachmentName(input.filename)
-  const directory = join(input.cacheDir, safeId(input.messageId), safeId(input.attachmentId))
-  const path = join(directory, filename)
+  // Hash the original IDs too: lossy path sanitization must not alias two records.
+  const directory = join(input.cacheDir, 'v2', identitySegment(input.accountId), identitySegment(input.messageId), identitySegment(input.attachmentId))
+  const path = join(directory, 'payload', filename)
   if (!resolve(path).startsWith(resolve(input.cacheDir) + sep)) {
     throw new Error('Attachment filename is missing or unsafe')
   }
-  const existing = await stat(path).catch(() => undefined)
-  if (existing?.isFile() && existing.size > 0) {
-    return { path, filename, mediaType: mediaTypeFor(filename), cached: true }
-  }
+  const key = resolve(path)
+  const prior = cacheFlights.get(key)
+  if (prior) return prior
+  const flight = cacheAttachment(input, directory, path, filename)
+  cacheFlights.set(key, flight)
+  try { return await flight } finally { if (cacheFlights.get(key) === flight) cacheFlights.delete(key) }
+}
+
+async function cacheAttachment(input: EnsureAttachmentInput, directory: string, path: string, filename: string): Promise<CachedAttachment> {
+  const manifestPath = join(directory, 'manifest.json')
+  // Legacy cache paths omit the account and have no integrity proof. Never reuse them.
+  try {
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as CacheManifest
+    if (manifest.version === 2 && manifest.accountId === input.accountId && manifest.messageId === input.messageId
+      && manifest.attachmentId === input.attachmentId && manifest.filename === filename
+      && typeof manifest.mediaType === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(manifest.mediaType)
+      && Number.isSafeInteger(manifest.bytes) && manifest.bytes >= 0 && manifest.bytes <= MAX_ATTACHMENT_BYTES
+      && typeof manifest.sha256 === 'string' && /^[a-f0-9]{64}$/.test(manifest.sha256)) {
+      const bytes = await readFile(path)
+      if (bytes.length === manifest.bytes && digest(bytes) === manifest.sha256) return { path, filename, mediaType: manifest.mediaType, cached: true }
+    }
+  } catch { /* Missing or interrupted cache entries must be fetched, never treated as ready. */ }
   const payload = await input.loadPayload()
   const bytes = await resolveAttachmentBytes(payload, input.download)
-  await mkdir(directory, { recursive: true })
-  await writeFile(path, bytes)
-  return { path, filename, mediaType: mediaTypeFor(filename, payload), cached: false }
+  const mediaType = mediaTypeFor(filename, payload)
+  const manifest: CacheManifest = { version: 2, accountId: input.accountId, messageId: input.messageId, attachmentId: input.attachmentId, filename, mediaType, bytes: bytes.length, sha256: digest(bytes) }
+  await mkdir(join(directory, 'payload'), { recursive: true })
+  const staging = `${path}.${randomUUID()}.partial`
+  const manifestStaging = `${manifestPath}.${randomUUID()}.partial`
+  try {
+    await durableWrite(staging, bytes)
+    await durableWrite(manifestStaging, Buffer.from(JSON.stringify(manifest)))
+    await rename(staging, path)
+    // The manifest is the readiness marker. A crash between the renames fails validation.
+    await rename(manifestStaging, manifestPath)
+    await syncDirectory(join(directory, 'payload'))
+    await syncDirectory(directory)
+  } finally {
+    await Promise.all([rm(staging, { force: true }), rm(manifestStaging, { force: true })])
+  }
+  return { path, filename, mediaType, cached: false }
+}
+
+async function durableWrite(path: string, bytes: Buffer): Promise<void> {
+  const handle = await open(path, 'wx', 0o600)
+  try { await handle.writeFile(bytes); await handle.sync() } finally { await handle.close() }
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, 'r')
+  try { await handle.sync() } finally { await handle.close() }
 }
 
 export async function openAttachmentFile(input: OpenAttachmentInput): Promise<OpenedAttachment> {
   const file = await ensureAttachmentFile(input)
   await input.openPath(file.path)
   return { path: file.path, filename: file.filename }
+}
+
+export async function cachedAttachmentStatus(input: Pick<EnsureAttachmentInput, 'accountId' | 'messageId' | 'attachmentId' | 'filename' | 'cacheDir'>): Promise<{ cached: boolean }> {
+  try {
+    await ensureAttachmentFile({ ...input, loadPayload: async () => { throw Object.assign(new Error('Attachment is not downloaded'), { code: 'cache_miss' }) } })
+    return { cached: true }
+  } catch (error) {
+    if ((error as { code?: string }).code === 'cache_miss') return { cached: false }
+    throw error
+  }
 }
 
 const MEDIA_TYPES: Record<string, string> = {
@@ -199,8 +254,9 @@ const MAX_ID_SEGMENT = 80
 function inlineAttachmentBytes(payload: unknown): Buffer | undefined {
   const record = asRecord(payload)
   const content = asRecord(record?.structuredContent) ?? record
-  const encoded = String(content?.base64_url_content ?? content?.data ?? asRecord(content?.attachment)?.data ?? '').replaceAll(/\s/g, '')
-  if (!encoded) return undefined
+  const value = content?.base64_url_content ?? content?.data ?? asRecord(content?.attachment)?.data
+  if (typeof value !== 'string') return undefined
+  const encoded = value.replaceAll(/\s/g, '')
   return Buffer.from(encoded.replaceAll('-', '+').replaceAll('_', '/'), 'base64')
 }
 

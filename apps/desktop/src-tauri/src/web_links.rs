@@ -51,19 +51,25 @@ pub fn queue_open(app: &AppHandle, url: Url) {
     });
 }
 pub fn create_mail_window(app: &AppHandle) -> tauri::Result<()> {
+    guard_mail_view(app, WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?).build()?;
+    Ok(())
+}
+/// A mail view (the main window or a message window) keeps the local page loaded; web pages open in the link viewer.
+pub fn guard_mail_view<'a>(app: &AppHandle, builder: WebviewWindowBuilder<'a, tauri::Wry, AppHandle>) -> WebviewWindowBuilder<'a, tauri::Wry, AppHandle> {
     let navigation_app = app.clone();
     let popup_app = app.clone();
     let dev = if cfg!(debug_assertions) { app.config().build.dev_url.clone() } else { None };
-    WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
+    builder
         .on_navigation(move |url| {
             if local_page(url, "/", dev.as_ref()) { return true; }
             if web_url(url.as_str()).is_ok() { queue_open(&navigation_app, url.clone()); }
             false
         })
         .on_new_window(move |url, _| { if web_url(url.as_str()).is_ok() { queue_open(&popup_app, url); } NewWindowResponse::Deny })
-        .build()?;
-    Ok(())
 }
+fn mail_view_label(label: &str) -> bool { label == "main" || label.starts_with(super::message_windows::LABEL_PREFIX) }
+/// The command came from the main mail window's local page.
+pub fn trusted_main(app: &AppHandle, view: &Webview) -> Result<(), String> { trusted(app, view, "main", "/") }
 fn layout(app: &AppHandle, size: PhysicalSize<u32>, scale: f64) {
     let top = (TOOLBAR_HEIGHT * scale).round() as u32;
     if let Some(view) = app.get_webview(TOOLBAR) {
@@ -117,12 +123,21 @@ fn focus_mail(app: &AppHandle) {
 }
 pub fn return_to_mail(app: &AppHandle) { if let Some(window) = app.get_window(WINDOW) { let _ = window.close(); } focus_mail(app); }
 
+fn is_sign_in_url(url: &Url) -> bool {
+    url.scheme() == "https" && ((url.host_str() == Some("auth.openai.com") && url.path() == "/oauth/authorize")
+        || (url.host_str() == Some("accounts.google.com") && url.path() == "/o/oauth2/v2/auth"))
+}
+
 #[tauri::command]
 pub async fn open_web_link(app: AppHandle, webview: Webview, url: String) -> Result<(), String> {
-    trusted(&app, &webview, "main", "/")?;
+    if !mail_view_label(webview.label()) { return Err("This command is only available from Dispatch controls".into()); }
+    trusted(&app, &webview, webview.label(), "/")?;
     let parsed = Url::parse(&url).map_err(|_| "This link is not a valid URL")?;
     if parsed.scheme() == "mailto" { return app.opener().open_url(parsed.to_string(), None::<&str>).map_err(|e| e.to_string()); }
     if parsed.scheme() == "codex" { return app.opener().open_url(external_app_url(&url)?.to_string(), None::<&str>).map_err(|e| e.to_string()); }
+    // The Codex OAuth callback belongs to App Server. Use the system browser so
+    // sign-in uses the user's existing login and returns to its localhost callback.
+    if is_sign_in_url(&parsed) { return app.opener().open_url(parsed.to_string(), None::<&str>).map_err(|e| e.to_string()); }
     open_page(&app, web_url(&url)?)
 }
 // Query and navigate the actual WKWebView history, not a JavaScript history invented by the page.
@@ -173,6 +188,18 @@ pub fn perform_action(app: &AppHandle, action: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn only_official_oauth_authorize_opens_external_sign_in() {
+        assert!(is_sign_in_url(&Url::parse("https://auth.openai.com/oauth/authorize?state=test").unwrap()));
+        assert!(is_sign_in_url(&Url::parse("https://accounts.google.com/o/oauth2/v2/auth?state=test").unwrap()));
+        for value in ["https://accounts.google.com.example.com/o/oauth2/v2/auth", "http://accounts.google.com/o/oauth2/v2/auth", "https://accounts.google.com/other"] {
+            assert!(!is_sign_in_url(&Url::parse(value).unwrap()));
+        }
+        for value in ["http://auth.openai.com/oauth/authorize", "https://auth.openai.com.example.com/oauth/authorize", "https://auth.openai.com/other", "https://example.com/oauth/authorize"] {
+            assert!(!is_sign_in_url(&Url::parse(value).unwrap()));
+        }
+    }
+
+    #[test]
     fn only_web_pages_enter_remote_view() {
         for url in ["https://example.com/a?b=c#d", "http://example.com"] { assert!(web_url(url).is_ok()); }
         for url in ["javascript:alert(1)", "file:///etc/passwd", "tauri://localhost", "data:text/html,test", "mailto:a@example.com"] { assert!(web_url(url).is_err()); }
@@ -183,6 +210,11 @@ mod tests {
         for url in ["codex://plugins/other@openai-curated", "codex://threads/new", "javascript:alert(1)"] {
             assert!(external_app_url(url).is_err());
         }
+    }
+    #[test]
+    fn only_mail_views_may_open_web_links() {
+        for label in ["main", "message-1", "message-42"] { assert!(mail_view_label(label)); }
+        for label in [TOOLBAR, CONTENT, WINDOW, "messages", "main-2", ""] { assert!(!mail_view_label(label)); }
     }
     #[test]
     fn mail_origin_is_exact_and_cannot_navigate_to_another_local_document() {

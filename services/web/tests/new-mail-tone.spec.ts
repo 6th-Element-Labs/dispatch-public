@@ -8,6 +8,11 @@ const first = { ...base, id: 'demo:t1', threadId: 't1', latestMessageId: 'm1', s
 const second = { ...base, id: 'demo:t2', threadId: 't2', latestMessageId: 'm2', subject: 'New arrival', receivedAt: '2026-09-04T09:52:00+12:00' }
 const older = { ...base, id: 'demo:t3', threadId: 't3', latestMessageId: 'm3', subject: 'Older unread', receivedAt: '2026-09-03T18:00:00+12:00' }
 
+test.beforeEach(async ({ page }) => {
+  // Unrouted calls fail as they do in CI, so a run never reaches the mail or agent service installed on this Mac.
+  await page.route(/^http:\/\/127\.0\.0\.1:(8411|8412)\//, route => route.abort('connectionrefused'))
+})
+
 type ToneWindow = { __toneStarts: number[]; AudioContext: typeof AudioContext }
 
 async function installFakeAudio(page: import('@playwright/test').Page): Promise<void> {
@@ -39,6 +44,8 @@ test('chimes once when a live refresh brings an unread conversation', async ({ p
   await page.route('http://127.0.0.1:8412/**', (route) => route.abort())
   await page.goto('/')
   await expect(page.getByRole('heading', { name: 'Berth' })).toBeVisible()
+  // The initial status check starts after the reader; establish its baseline before changing the fixture.
+  await expect(page.locator('[data-mail-source]')).toHaveText(/^Gmail synced/)
   expect(await toneStarts(page)).toBe(0)
   list = [second, first]
   completedAt = '2026-09-04T09:06:00+12:00'

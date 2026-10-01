@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'node:net'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CodexBindingStore, defaultCodexWorkspace } from '../src/codex-bindings.js'
@@ -13,10 +13,30 @@ it('puts the stable draft marker on a MIME leaf accepted by Gmail', () => {
   expect(payload.parts[0]?.content_id).toBe('dispatch-key@draft.dispatch.local')
 })
 
+it('keeps append markers as normal attachments while preserving images referenced by CID', () => {
+  const args = draftArguments({ to: 'test@example.com', subject: 'Draft', bodyMarkdown: 'Body', bodyHtml: '<p>Body <img src="cid:logo@example.com"></p>', attachments: [
+    { filename: 'proposal.txt', mime_type: 'text/plain', data: 'aGk=', contentId: 'dispatch-operation-0@draft.dispatch.local' },
+    { filename: 'logo.png', mime_type: 'image/png', data: 'aGk=', contentId: 'logo@example.com' },
+  ] })
+  const payload = args.payload as { parts: { content_id?: string; content_disposition?: string }[] }
+  expect(payload.parts[1]).toMatchObject({ content_id: 'dispatch-operation-0@draft.dispatch.local', content_disposition: 'attachment' })
+  expect(payload.parts[2]).toMatchObject({ content_id: 'logo@example.com', content_disposition: 'inline' })
+})
+
 const servers: ReturnType<typeof createAgentServer>[] = []
+let executionDirectory: string
+let executionPath: string
+
+beforeEach(async () => {
+  executionDirectory = await mkdtemp(join(tmpdir(), 'dispatch-agent-execution-'))
+  executionPath = join(executionDirectory, 'codex-execution.json')
+  vi.stubEnv('DISPATCH_CODEX_EXECUTION_PREFERENCES', executionPath)
+})
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))))
+  vi.unstubAllEnvs()
+  await rm(executionDirectory, { recursive: true, force: true })
 })
 
 function runtime() {
@@ -29,6 +49,7 @@ function runtime() {
     subscribe: vi.fn((_next: (message: { id?: number | string; method?: string; params?: unknown }) => void) => () => undefined),
     respond: vi.fn(),
     close: vi.fn(),
+    setIdleGuard: vi.fn((_guard: () => boolean) => undefined),
   }
 }
 
@@ -60,16 +81,99 @@ async function startWithBindings() {
 }
 
 describe('dispatch-agent', () => {
+  it('reapplies the saved no-approval mode on new chats, resumed chats and subsequent turns', async () => {
+    await writeFile(executionPath, JSON.stringify({ version: 1, mode: 'full-access' }))
+    const { base, fake } = await start()
+    expect((await fetch(`${base}/v1/threads`, { method: 'POST' })).status).toBe(201)
+    expect(rpcParams(fake, 'thread/start')).toMatchObject({ approvalPolicy: 'never', sandbox: 'danger-full-access' })
+    expect((await fetch(`${base}/v1/threads/thread-1/resume`, { method: 'POST' })).status).toBe(200)
+    expect(rpcParams(fake, 'thread/resume')).toMatchObject({ threadId: 'thread-1', approvalPolicy: 'never', sandbox: 'danger-full-access' })
+    expect((await fetch(`${base}/v1/threads/thread-1/turns`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Review this attachment.' }),
+    })).status).toBe(202)
+    expect(rpcParams(fake, 'turn/start')).toMatchObject({ approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } })
+    expect(await (await fetch(`${base}/v1/execution-preferences`)).json()).toEqual({ preferences: { version: 1, mode: 'full-access' } })
+  })
+
+  it('saves a setting across agent restarts and changes the next turn of an existing chat', async () => {
+    const { base, fake } = await start()
+    const setting = { version: 1, mode: 'workspace' }
+    const result = await fetch(`${base}/v1/execution-preferences`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(setting),
+    })
+    expect(result.status).toBe(200)
+    expect(await result.json()).toEqual({ preferences: setting })
+    const restarted = await start()
+    expect(await (await fetch(`${restarted.base}/v1/execution-preferences`)).json()).toEqual({ preferences: setting })
+    expect((await fetch(`${base}/v1/threads/thread-1/turns`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Test workspace mode.' }),
+    })).status).toBe(202)
+    expect(rpcParams(fake, 'turn/start')).toMatchObject({ approvalPolicy: 'on-request', sandboxPolicy: {
+      type: 'workspaceWrite', writableRoots: [defaultCodexWorkspace()], networkAccess: false,
+    } })
+    expect((await fetch(`${base}/v1/execution-preferences`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ version: 1, mode: 'full-access' }),
+    })).status).toBe(200)
+    fake.request.mockClear()
+    await fetch(`${base}/v1/threads/thread-1/turns`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Test full access again.' }),
+    })
+    expect(rpcParams(fake, 'turn/start')).toMatchObject({ approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } })
+    expect(fake.request).not.toHaveBeenCalledWith('thread/start', expect.anything())
+  })
+
+  it('rejects invalid settings without changing the saved choice and supports browser preflight', async () => {
+    const { base } = await start()
+    const response = await fetch(`${base}/v1/execution-preferences`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ version: 1, mode: 'typo' }),
+    })
+    expect(response.status).toBe(400)
+    expect(await (await fetch(`${base}/v1/execution-preferences`)).json()).toEqual({ preferences: { version: 1, mode: 'full-access' } })
+    const preflight = await fetch(`${base}/v1/execution-preferences`, { method: 'OPTIONS' })
+    expect(preflight.headers.get('access-control-allow-methods')).toContain('PUT')
+  })
+
+  it('keeps a saved email chat identity when applying the full-access preference', async () => {
+    await writeFile(executionPath, JSON.stringify({ version: 1, mode: 'full-access' }))
+    const { base, fake, bindings } = await startWithBindings()
+    const key = { kind: 'conversation' as const, accountId: 'one', gmailThreadId: 'mail-thread' }
+    await bindings.put(key, 'existing-chat')
+    const response = await fetch(`${base}/v1/threads/bindings`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(key),
+    })
+    expect(response.status).toBe(200)
+    expect(fake.request).toHaveBeenCalledWith('thread/resume', expect.objectContaining({ threadId: 'existing-chat', approvalPolicy: 'never', sandbox: 'danger-full-access' }))
+    expect(fake.request).not.toHaveBeenCalledWith('thread/start', expect.anything())
+    expect(bindings.get(key)).toBe('existing-chat')
+  })
+
+  it('refuses to start work when a saved execution preference is corrupt', async () => {
+    await writeFile(executionPath, '{')
+    const { base, fake } = await start()
+    expect((await fetch(`${base}/v1/threads`, { method: 'POST' })).status).toBe(502)
+    expect(fake.request).not.toHaveBeenCalled()
+    expect((await fetch(`${base}/v1/execution-preferences`)).status).toBe(500)
+  })
+
   it('refuses an update while Codex works and stops admitting work once idle drain succeeds', async () => {
     const { base, fake } = await start()
     const emit = fake.subscribe.mock.calls[0]![0]
+    const idle = fake.setIdleGuard.mock.calls[0]![0]
+    expect(idle()).toBe(true)
     const control = { method: 'POST', headers: { 'x-dispatch-runtime': 'development' } }
     expect((await fetch(`${base}/v1/runtime/drain`, { method: 'POST' })).status).toBe(403)
     emit({ method: 'turn/started', params: { threadId: 'background', turn: { id: 'turn-1' } } })
+    expect(idle()).toBe(false)
     expect((await fetch(`${base}/v1/runtime/drain`, control)).status).toBe(409)
     expect(await (await fetch(`${base}/v1/runtime`)).json()).toMatchObject({ activeOperations: 1, draining: false })
     emit({ method: 'turn/completed', params: { threadId: 'background', turn: { id: 'turn-1', status: 'completed' } } })
+    expect(idle()).toBe(true)
+    emit({ id: 7, method: 'mcpServer/elicitation/request', params: { threadId: 'background' } })
+    expect(idle()).toBe(false)
+    emit({ method: 'serverRequest/resolved', params: { requestId: 7 } })
+    expect(idle()).toBe(true)
     expect((await fetch(`${base}/v1/runtime/drain`, control)).status).toBe(200)
+    expect(idle()).toBe(false)
     expect((await fetch(`${base}/v1/threads`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(503)
     expect((await fetch(`${base}/v1/runtime/resume`, control)).status).toBe(200)
     expect((await fetch(`${base}/v1/threads`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(201)
@@ -83,7 +187,7 @@ describe('dispatch-agent', () => {
     await expect(response.json()).resolves.toMatchObject({ harness: 'codex-app-server' })
   })
 
-  it('starts a Codex thread that inherits the user Codex config and allows Gmail MCP', async () => {
+  it('starts a full-access Codex thread with the user model config and Gmail MCP', async () => {
     const { base, fake } = await start()
     const response = await fetch(`${base}/v1/threads`, { method: 'POST' })
     expect(response.status).toBe(201)
@@ -94,9 +198,9 @@ describe('dispatch-agent', () => {
       serviceName: 'dispatch-agent',
     })
     expect(params).not.toHaveProperty('model')
-    expect(params).not.toHaveProperty('approvalPolicy')
+    expect(params).toHaveProperty('approvalPolicy', 'never')
     expect(params).not.toHaveProperty('sandboxPolicy')
-    expect(params).not.toHaveProperty('sandbox')
+    expect(params).toHaveProperty('sandbox', 'danger-full-access')
     expect(String(params.developerInstructions)).not.toMatch(/Never call gmail\.send/)
     expect(String(params.developerInstructions)).toContain('send mail')
     expect(String(params.developerInstructions)).toMatch(/attachment/i)
@@ -114,7 +218,7 @@ describe('dispatch-agent', () => {
       developerInstructions: expect.stringMatching(/send_draft|send_email/),
     })
     expect(params).not.toHaveProperty('model')
-    expect(params).not.toHaveProperty('approvalPolicy')
+    expect(params).toHaveProperty('approvalPolicy', 'never')
     expect(String(params.developerInstructions)).not.toMatch(/Never call gmail\.send/)
   })
 
@@ -126,7 +230,7 @@ describe('dispatch-agent', () => {
     expect(params).toMatchObject({ threadId: 'thread-1' })
     expect(params).not.toHaveProperty('model')
     expect(params).not.toHaveProperty('effort')
-    expect(params).not.toHaveProperty('approvalPolicy')
+    expect(params).toHaveProperty('approvalPolicy', 'never')
   })
 
   it('forwards the model and effort the client chose for a turn', async () => {
@@ -295,6 +399,27 @@ describe('dispatch-agent', () => {
     expect(fake.request).toHaveBeenCalledWith('mcpServer/tool/call', expect.objectContaining({
       arguments: { link_id: 'link-one', query: '-in:spam', label_ids: ['INBOX', 'UNREAD'], max_results: 20, next_page_token: 'next-1' },
     }))
+  })
+
+  it('passes exact Gmail system label IDs to the message ID search', async () => {
+    const { base, fake } = await start()
+    fake.request.mockImplementation(async (method: string) => {
+      if (method === 'mcpServerStatus/list') return { data: [{ name: 'codex_apps', tools: {
+        'gmail.search_email_ids': { _meta: { connector_name: 'Gmail', connector_id: 'gmail', link_id: 'link-one' } },
+      } }] }
+      if (method === 'thread/start') return { thread: { id: 'connector-thread' } }
+      if (method === 'mcpServer/tool/call') return { structuredContent: { message_ids: ['m1'], next_page_token: '' } }
+      return { ok: true }
+    })
+    const search = (payload: Record<string, unknown>) => fetch(`${base}/v1/connectors/gmail/search`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+    })
+    expect((await search({ linkId: 'link-one', query: '-in:inbox -in:sent', labelIds: [], maxResults: 50, nextPageToken: 'next-1' })).status).toBe(200)
+    expect(fake.request).toHaveBeenCalledWith('mcpServer/tool/call', expect.objectContaining({
+      tool: 'gmail.search_email_ids',
+      arguments: { link_id: 'link-one', query: '-in:inbox -in:sent', label_ids: [], max_results: 50, next_page_token: 'next-1' },
+    }))
+    expect((await search({ linkId: 'link-one', query: 'in:inbox', labelIds: 'INBOX' })).status).toBe(400)
   })
 
   it('applies accepted Gmail read-state label changes', async () => {
@@ -754,4 +879,14 @@ it('updates only draft headers without replacing the MIME body or attachments', 
   const response = await fetch(`${base}/v1/connectors/gmail/drafts/update`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ linkId: 'link-one', draftId: 'draft-one', preserveContent: true, to: 'new@example.com' }) })
   expect(response.status).toBe(200)
   expect(fake.request).toHaveBeenCalledWith('mcpServer/tool/call', expect.objectContaining({ arguments: { link_id: 'link-one', draft_id: 'draft-one', to: 'new@example.com' } }))
+})
+
+it('starts managed Codex reconnection without replaying email writes or logging out', async () => {
+  const { base, fake } = await start()
+  fake.request.mockResolvedValueOnce({ authUrl: 'https://auth.openai.com/oauth/authorize?state=test', loginId: 'test' })
+  const response = await fetch(`${base}/v1/account/reconnect`, { method: 'POST' })
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ authUrl: 'https://auth.openai.com/oauth/authorize?state=test' })
+  expect(fake.request).toHaveBeenCalledWith('account/login/start', { type: 'chatgpt' })
+  expect(fake.request.mock.calls.some(call => call[0] === 'account/logout' || call[0] === 'mcpServer/tool/call')).toBe(false)
 })

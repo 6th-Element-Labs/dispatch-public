@@ -6,19 +6,250 @@
   "properties": {
     "message": {
       "type": "object",
-      "required": ["id", "threadId", "sender", "subject", "receivedAt", "preview", "body"],
+      "required": [
+        "id",
+        "threadId",
+        "sender",
+        "subject",
+        "receivedAt",
+        "preview",
+        "body"
+      ],
       "properties": {
-        "id": {"type": "string"},
-        "threadId": {"type": "string"},
-        "sender": {"type": "object"},
-        "subject": {"type": "string"},
-        "receivedAt": {"type": "string"},
-        "preview": {"type": "string"},
-        "body": {"type": "object"}
+        "id": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "sender": {
+          "type": "object"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "receivedAt": {
+          "type": "string"
+        },
+        "preview": {
+          "type": "string"
+        },
+        "body": {
+          "type": "object"
+        },
+        "bodyText": {
+          "type": "string",
+          "description": "Authored plain MIME alternative, when the provider supplied it."
+        }
       },
       "additionalProperties": true
+    },
+    "draftSaveCommand": {
+      "type": "object",
+      "required": [
+        "accountId"
+      ],
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "draftId": {
+          "type": "string"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "cc": {
+          "type": "string"
+        },
+        "bcc": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "bodyMarkdown": {
+          "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "mediaType"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "clientDraftId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "base": {
+          "$ref": "#/properties/draft",
+          "description": "Original account-owned editor baseline for field conflict detection."
+        }
+      },
+      "additionalProperties": false
+    },
+    "draft": {
+      "type": "object",
+      "required": [
+        "id",
+        "accountId",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "accountId": {
+          "type": "string"
+        },
+        "state": {
+          "const": "draft"
+        },
+        "syncState": {
+          "enum": [
+            "pending",
+            "failed"
+          ]
+        },
+        "syncError": {
+          "type": "string"
+        },
+        "reconnectRequired": {
+          "type": "boolean"
+        },
+        "resolvedFromDraftId": {
+          "type": "string"
+        },
+        "draftRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "conflict": {
+          "type": "object",
+          "required": [
+            "fields",
+            "remote"
+          ],
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "to",
+                  "cc",
+                  "bcc",
+                  "subject",
+                  "bodyMarkdown",
+                  "attachments"
+                ]
+              }
+            },
+            "remote": {
+              "$ref": "#/properties/draft"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "draftConflictCommand": {
+      "type": "object",
+      "required": [
+        "accountId",
+        "choice"
+      ],
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "choice": {
+          "enum": [
+            "keep-local",
+            "use-remote"
+          ]
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "draftAttachmentAppendCommand": {
+      "type": "object",
+      "required": [
+        "accountId",
+        "operationId",
+        "paths"
+      ],
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operationId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "attachmentCacheStatus": {
+      "type": "object",
+      "required": [
+        "cached"
+      ],
+      "properties": {
+        "cached": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "conversationCompleteness": {
+      "type": "object",
+      "required": [
+        "complete",
+        "knownCount",
+        "loadedCount"
+      ],
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "knownCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Lower bound when the remote total is not authoritative."
+        },
+        "loadedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false
 }
-

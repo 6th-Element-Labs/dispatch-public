@@ -17,6 +17,14 @@ export function requestErrorCode(text: string): string | undefined {
 export function describeRequestError(text: string): string {
   if (!/Request failed \(\d+\)|\{"error"/.test(text)) return text
   const code = requestErrorCode(text)
+  if (code === 'gmail_backoff' || /Gmail is rate limiting this account/.test(text)) {
+    // Gmail rate limited the account and named when to retry; the mail service blocks calls until then.
+    // Some routes wrap it in their own code, so the sentence is matched as well.
+    const until = new Date(/Retry after (\d{4}-\d\d-\d\dT[\d:.]+Z)/.exec(text)?.[1] ?? '')
+    if (Number.isNaN(until.getTime())) return 'Gmail is limiting requests from this account. Try again in a few minutes.'
+    const today = until.toDateString() === new Date().toDateString()
+    return `Gmail is limiting requests from this account until ${until.toLocaleString([], today ? { hour: 'numeric', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}. Try again then.`
+  }
   if (code && MESSAGES[code]) return MESSAGES[code]
   const status = /Request failed \((\d+)\)/.exec(text)?.[1]
   const detail = /"detail"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(text)?.[1]?.replace(/\\"/g, '"')

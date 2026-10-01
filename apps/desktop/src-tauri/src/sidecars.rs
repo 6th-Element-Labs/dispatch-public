@@ -89,6 +89,11 @@ pub fn service_env(
         ),
     ];
     if service == Service::Agent {
+        // Explicit runtime overrides remain pinned; normal installed builds update themselves.
+        let automatic = std::env::var("DISPATCH_CODEX_AUTO_UPDATE").unwrap_or_else(|_| {
+            if dev || std::env::var("DISPATCH_CODEX_COMMAND").map(|v| !v.trim().is_empty()).unwrap_or(false) { "0" } else { "1" }.into()
+        });
+        env.push(("DISPATCH_CODEX_AUTO_UPDATE".into(), automatic));
         if let Some(codex) = codex {
             env.push(("DISPATCH_CODEX_COMMAND".to_string(), codex.display().to_string()));
         }

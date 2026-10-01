@@ -84,6 +84,8 @@
 :root[data-bs-theme="dark"] .dropdown-menu { box-shadow: var(--tblr-box-shadow-dropdown); }
 :root[data-bs-theme="dark"] .form-control { background: var(--tblr-form-control-bg); border-color: var(--tblr-border-color); }
 :root[data-bs-theme="dark"] .form-control:focus { border-color: rgba(10, 132, 255, 0.6); box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.2); }
+/* Draft header fields and the message box sit inline on the card, without input boxes. */
+:root[data-bs-theme="dark"] :is(.dispatch-draft-field .form-control, .dispatch-draft .dispatch-draft-text) { background: transparent; box-shadow: none; }
 :root[data-bs-theme="dark"] .btn-primary { background: var(--tblr-primary); border-color: var(--tblr-primary); color: #fff; }
 :root[data-bs-theme="dark"] .btn-primary:hover { background: #3395ff; border-color: #3395ff; }
 :root[data-bs-theme="dark"] ::selection { background: rgba(10, 132, 255, 0.35); }

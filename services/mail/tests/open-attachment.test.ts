@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, mkdir, rm, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { attachmentDownloadUrl, ensureAttachmentFile, mediaTypeFor, nativeOpenCommand, openAttachmentFile, safeId } from '../src/open-attachment.js'
 
 async function cacheDir(): Promise<string> {
@@ -18,10 +18,78 @@ describe('nativeOpenCommand', () => {
 })
 
 describe('openAttachmentFile', () => {
+  it('isolates identical message and attachment IDs in different accounts, including sanitized aliases', async () => {
+    const cache = await cacheDir()
+    const base = { messageId: 'm1', attachmentId: 'a1', filename: 'private.txt', cacheDir: cache }
+    const a = await ensureAttachmentFile({ ...base, accountId: 'work/one', loadPayload: async () => ({ data: Buffer.from('account A').toString('base64') }) })
+    const b = await ensureAttachmentFile({ ...base, accountId: 'work-one', loadPayload: async () => ({ data: Buffer.from('account B').toString('base64') }) })
+    expect(a.path).not.toBe(b.path)
+    expect(await readFile(b.path, 'utf8')).toBe('account B')
+    await expect(ensureAttachmentFile({ ...base, accountId: '', loadPayload: async () => ({}) })).rejects.toThrow('identities are required')
+  })
+
+  it('does not reuse ambiguous legacy files or a published file without a readiness manifest', async () => {
+    const cache = await cacheDir()
+    const legacy = join(cache, 'm1', 'a1')
+    await mkdir(legacy, { recursive: true }); await writeFile(join(legacy, 'note.txt'), 'legacy private data')
+    let loads = 0
+    const input = { accountId: 'one', messageId: 'm1', attachmentId: 'a1', filename: 'note.txt', cacheDir: cache, loadPayload: async () => { loads++; return { data: Buffer.from('complete data').toString('base64') } } }
+    const first = await ensureAttachmentFile(input)
+    expect(await readFile(first.path, 'utf8')).toBe('complete data')
+    await rm(join(dirname(dirname(first.path)), 'manifest.json'))
+    await writeFile(first.path, 'partial')
+    await ensureAttachmentFile(input)
+    expect(loads).toBe(2)
+    expect(await readFile(first.path, 'utf8')).toBe('complete data')
+    expect((await readdir(dirname(first.path))).some(name => name.endsWith('.partial'))).toBe(false)
+  })
+
+  it('validates cached byte hashes and preserves the prior cache if a refetch fails', async () => {
+    const cache = await cacheDir()
+    const input = { accountId: 'one', messageId: 'm1', attachmentId: 'a1', filename: 'note.txt', cacheDir: cache, loadPayload: async () => ({ data: Buffer.from('complete').toString('base64') }) }
+    const first = await ensureAttachmentFile(input)
+    await writeFile(first.path, 'corrupted')
+    await expect(ensureAttachmentFile({ ...input, loadPayload: async () => { throw new Error('offline') } })).rejects.toThrow('offline')
+    const refreshed = await ensureAttachmentFile(input)
+    expect(refreshed.cached).toBe(false)
+    expect(await readFile(first.path, 'utf8')).toBe('complete')
+  })
+
+  it('coalesces simultaneous downloads and treats zero-byte attachments as valid cached files', async () => {
+    const cache = await cacheDir()
+    let release!: () => void; let loads = 0
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const input = { accountId: 'one', messageId: 'm1', attachmentId: 'a1', filename: 'empty.txt', cacheDir: cache, loadPayload: async () => { loads++; await gate; return { data: '', size_bytes: 0 } } }
+    const first = ensureAttachmentFile(input), second = ensureAttachmentFile(input)
+    release()
+    const [a, b] = await Promise.all([first, second])
+    expect(a.path).toBe(b.path)
+    expect(loads).toBe(1)
+    expect((await readFile(a.path)).length).toBe(0)
+    const cached = await ensureAttachmentFile({ ...input, loadPayload: async () => { throw new Error('offline') } })
+    expect(cached.cached).toBe(true)
+  })
+
+  it('rejects damaged manifest metadata even when the payload hash still matches', async () => {
+    const cache = await cacheDir()
+    const input = { accountId: 'one', messageId: 'm1', attachmentId: 'a1', filename: 'note.txt', cacheDir: cache, loadPayload: async () => ({ data: Buffer.from('complete').toString('base64') }) }
+    const first = await ensureAttachmentFile(input)
+    const manifestPath = join(dirname(dirname(first.path)), 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    await writeFile(manifestPath, JSON.stringify({ ...manifest, mediaType: 'invalid\r\nheader' }))
+    await expect(ensureAttachmentFile({ ...input, loadPayload: async () => { throw new Error('offline') } })).rejects.toThrow('offline')
+    const repaired = await ensureAttachmentFile(input)
+    expect(repaired).toMatchObject({ cached: false, mediaType: 'text/plain' })
+  })
+
+  it('checks declared size for inline bytes before publishing the cache', async () => {
+    await expect(ensureAttachmentFile({ accountId: 'one', messageId: 'm1', attachmentId: 'a1', filename: 'note.txt', cacheDir: await cacheDir(), loadPayload: async () => ({ data: Buffer.from('short').toString('base64'), size_bytes: 99 }) })).rejects.toThrow('expected 99')
+  })
   it('writes the attachment under its safe filename and opens that path', async () => {
     const opened: string[] = []
     const cache = await cacheDir()
     const result = await openAttachmentFile({
+      accountId: 'account-one',
       messageId: 'msg/1',
       attachmentId: 'att/9',
       filename: 'Opua arrival instructions.pdf',
@@ -31,7 +99,10 @@ describe('openAttachmentFile', () => {
     })
 
     expect(result.filename).toBe('Opua arrival instructions.pdf')
-    expect(result.path).toBe(join(cache, 'msg-1', 'att-9', 'Opua arrival instructions.pdf'))
+    expect(result.path).toContain(join(cache, 'v2'))
+    expect(result.path).toContain('msg-1-')
+    expect(result.path).toContain('att-9-')
+    expect(result.path).toContain(join('payload', 'Opua arrival instructions.pdf'))
     expect(opened).toEqual([result.path])
     await expect(readFile(result.path, 'utf8')).resolves.toBe('%PDF-1.1 demo')
   })
@@ -40,6 +111,7 @@ describe('openAttachmentFile', () => {
     const cache = await cacheDir()
     const bytes = Buffer.from('hello+/world')
     const result = await openAttachmentFile({
+      accountId: 'account-one',
       messageId: 'm1',
       attachmentId: 'a1',
       filename: 'note.txt',
@@ -55,6 +127,7 @@ describe('openAttachmentFile', () => {
     const requested: string[] = []
     const url = 'https://files.example.com/att/9?sig=abc'
     const result = await openAttachmentFile({
+      accountId: 'account-one',
       messageId: 'm1',
       attachmentId: 'a1',
       filename: '1670281874.pdf',
@@ -71,6 +144,7 @@ describe('openAttachmentFile', () => {
     expect(() => attachmentDownloadUrl({ structuredContent: { download_url: 'http://files.example.com/x' } })).toThrow('must use https')
     expect(attachmentDownloadUrl({ structuredContent: { structuredContent: { file_uri: { download_url: 'https://files.example.com/nested' } } } })).toBe('https://files.example.com/nested')
     await expect(openAttachmentFile({
+      accountId: 'account-one',
       messageId: 'm1',
       attachmentId: 'a1',
       filename: 'note.pdf',
@@ -89,6 +163,7 @@ describe('openAttachmentFile', () => {
     expect(safeId('att/9')).toBe('att-9')
     const cache = await cacheDir()
     const result = await openAttachmentFile({
+      accountId: 'account-one',
       messageId: '1a073fd8fd45e872',
       attachmentId: longId,
       filename: '1670281874.pdf',
@@ -96,13 +171,14 @@ describe('openAttachmentFile', () => {
       cacheDir: cache,
       openPath: async () => undefined,
     })
-    expect(result.path).toBe(join(cache, '1a073fd8fd45e872', segment, '1670281874.pdf'))
+    expect(result.path).toContain('1a073fd8fd45e872-')
+    expect(result.path).toContain(join('payload', '1670281874.pdf'))
   })
 
   it('reuses a cached file without asking the connector again', async () => {
     const cache = await cacheDir()
     let loads = 0
-    const input = { messageId: 'm1', attachmentId: 'a1', filename: 'photo.png', cacheDir: cache, loadPayload: async () => { loads += 1; return { structuredContent: { mime_type: 'image/png', data: Buffer.from('png-bytes').toString('base64') } } } }
+    const input = { accountId: 'account-one', messageId: 'm1', attachmentId: 'a1', filename: 'photo.png', cacheDir: cache, loadPayload: async () => { loads += 1; return { structuredContent: { mime_type: 'image/png', data: Buffer.from('png-bytes').toString('base64') } } } }
     const first = await ensureAttachmentFile(input)
     const second = await ensureAttachmentFile(input)
     expect(first).toMatchObject({ cached: false, mediaType: 'image/png' })
@@ -114,6 +190,7 @@ describe('openAttachmentFile', () => {
 
   it('surfaces the connector error instead of a generic missing-bytes message', async () => {
     await expect(openAttachmentFile({
+      accountId: 'account-one',
       messageId: 'm1',
       attachmentId: 'a1',
       filename: 'image.png',
@@ -125,6 +202,7 @@ describe('openAttachmentFile', () => {
 
   it('rejects a missing attachment payload', async () => {
     await expect(openAttachmentFile({
+      accountId: 'account-one',
       messageId: 'm1',
       attachmentId: 'a1',
       filename: 'note.pdf',
@@ -137,6 +215,7 @@ describe('openAttachmentFile', () => {
   it('keeps a traversal filename inside the cache directory', async () => {
     const cache = await cacheDir()
     const result = await openAttachmentFile({
+      accountId: 'account-one',
       messageId: 'm1',
       attachmentId: 'a1',
       filename: '../../etc/passwd',
@@ -145,13 +224,15 @@ describe('openAttachmentFile', () => {
       openPath: async () => undefined,
     })
     expect(result.filename).toBe('passwd')
-    expect(result.path).toBe(join(cache, 'm1', 'a1', 'passwd'))
+    expect(result.path.startsWith(join(cache, 'v2') + '/')).toBe(true)
+    expect(result.path.endsWith('/payload/passwd')).toBe(true)
   })
 
   it('rejects an empty or dot filename', async () => {
     const cache = await cacheDir()
     for (const filename of ['', '.', '..', '/']) {
       await expect(openAttachmentFile({
+      accountId: 'account-one',
         messageId: 'm1',
         attachmentId: 'a1',
         filename,
@@ -164,6 +245,7 @@ describe('openAttachmentFile', () => {
 
   it('does not hide a failed default-app open', async () => {
     await expect(openAttachmentFile({
+      accountId: 'account-one',
       messageId: 'm1',
       attachmentId: 'a1',
       filename: 'note.pdf',

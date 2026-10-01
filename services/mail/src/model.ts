@@ -32,6 +32,8 @@ export interface MessageProjection extends MessageSummary {
     readonly kind: 'sanitized-html' | 'plain-text'
     readonly content: string
   }
+  /** Original parallel text/plain MIME body, when Gmail returned one. */
+  readonly bodyText?: string
   readonly attachments: readonly AttachmentProjection[]
   readonly to?: readonly MailAddress[]
   readonly cc?: readonly MailAddress[]
@@ -51,6 +53,12 @@ export interface DraftAttachment {
 }
 
 export interface DraftProjection {
+  readonly draftRevision?: number
+  readonly conflict?: { readonly fields: readonly string[]; readonly remote: DraftProjection }
+  readonly syncState?: 'pending' | 'failed'
+  readonly syncError?: string
+  readonly reconnectRequired?: boolean
+  readonly resolvedFromDraftId?: string
   readonly cachedAt?: string
   readonly gmailThreadId?: string
   readonly gmailMessageId?: string
@@ -94,6 +102,7 @@ export interface ConversationSummary {
 }
 
 export interface ConversationProjection extends ConversationSummary {
+  readonly completeness?: { readonly complete: boolean; readonly knownCount: number; readonly loadedCount: number; readonly reason?: string }
   readonly availability?: { readonly mode: 'live' | 'downloaded'; readonly cachedAt: string; readonly reason?: string }
   readonly messages: readonly MessageProjection[]
   readonly source: 'demo' | 'gmail'

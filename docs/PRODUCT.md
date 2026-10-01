@@ -32,7 +32,7 @@ A right-click on a thread row selects that conversation and does not start the d
 
 Unread rows show a blue avatar mark, bold sender and subject, and a light blue background. Read rows use normal weight and dimmer text.
 
-The user can keep one, two, or three panels open. Each panel has an explicit visibility control. At least one panel remains visible. The messages and Codex panel widths are adjustable and persist locally.
+The user can keep one, two, or three panels open. Each panel has an explicit visibility control. At least one panel remains visible. The messages and Codex panel widths are adjustable and persist locally. When Email is hidden, Codex fills the remaining workspace. Restoring Email restores the saved Codex width.
 
 ## Version-one acceptance
 
@@ -49,7 +49,7 @@ The first useful version lets a user:
 7. Review and edit the draft in the middle panel.
 8. Confirm recipients and subject, then send from the Send button, or ask Codex to send that draft through the installed Gmail connector.
 
-The middle panel owns the visible Gmail draft. Recipient, subject, and Markdown body remain editable. Codex creates and revises that same Gmail draft through the installed connector, including attachments. A draft that Codex creates through MCP opens in the middle panel. The user can send from the Send button, or ask Codex to call `gmail.send_draft` or `gmail.send_email`. Autonomous send without a user request remains out of scope.
+The middle panel owns the visible Gmail draft. Recipient, subject, and message body remain editable. The body uses a rich editor with bold, italic, underline, links, lists, and formatted paste. Mail still owns the saved Markdown and rendered email. New and saved drafts can open in their own window. Use the draft header button, double-click its Drafts row, choose Open in New Window from the row menu, or use File > Open in New Window (Command-O). Pop-out transfers the current local editor, including recipients, text, and attachments, without requiring a Gmail save. One window edits each draft at a time. Codex creates and revises that same Gmail draft through the installed connector, including attachments. A draft that Codex creates through MCP opens in the middle panel. The user can send from the Send button, or ask Codex to call `gmail.send_draft` or `gmail.send_email`. Autonomous send without a user request remains out of scope.
 
 The Codex picker shows the user's Codex config model and effort until the user picks a different pair in Dispatch. A Dispatch pick stays in this browser only and does not write `config.toml`. Codex restores stored thread turns after reload, shows plans and tool activity, accepts same-turn steering, and exposes interruption. Gmail attachments use their exact parent message and attachment identities. A click on the desktop client asks mail to write the file and open it with the default native app for that extension. The same identities stay in Codex citation context. Inline CID images still load through the existing attachment GET.
 
@@ -80,10 +80,27 @@ Transient task-resume failures keep the existing history binding and retry. A ne
 Gmail draft recipient fields accept the connector's string arrays as well as legacy strings. To, Cc, and Bcc survive opening and refreshing a draft. The Send button requires at least one To, Cc, or Bcc recipient and does not save an unchanged Gmail draft first; this preserves the provider's original recipients, formatting, and attachments. A changed draft or account invalidates its pending send confirmation.
 
 
-Dispatch embeds the full installed Codex experience, not an email-only agent. It adds no model, sandbox, capability allowlist, or send-button-only policy. The user’s normal Codex configuration and permissions remain authoritative. The internal `dispatch_mail` tools provide an optional path to list accounts, read/create/update drafts, and send the saved draft through Dispatch’s mail service. Header-only updates preserve original MIME content and attachments. These tools are configured for new and resumed conversations, and their confirmed results update the visible editor. The visible draft ID, account, recipients, and unsaved state are supplied as context.
+Dispatch embeds the full installed Codex experience, not an email-only agent. It adds no model or capability allowlist, or send-button-only policy. The user selects execution permissions in Dispatch; normal Codex model, tools and managed requirements remain authoritative. The internal `dispatch_mail` tools provide an optional path to list accounts, read/create/update drafts, and send the saved draft through Dispatch’s mail service. Header-only updates preserve original MIME content and attachments. These tools are configured for new and resumed conversations, and their confirmed results update the visible editor. The visible draft ID, account, recipients, and unsaved state are supplied as context.
 
+
+The Codex composer shows a permissions button beside the model picker. **Full access** is the default:
+Codex can run commands without command approval prompts. **Workspace** is optional: shell commands
+use the Dispatch workspace sandbox and request approval for access beyond it. The choice is saved
+by the agent service and applies to all Dispatch chats on the next turn. A running turn keeps its
+existing permissions; changing the setting does not interrupt it or replace email chat history.
+The control reports save failures and only displays the confirmed saved mode. Dispatch reapplies
+that mode on new chats, resumed chats and later turns, including after runtime updates. Managed
+Codex requirements still apply.
+
+The Codex composer keeps the model, permissions and primary action on one row. Setup is in
+the Codex header gear. Send and Stop occupy the same fixed position; typing during work exposes
+a separate follow-up Send immediately beside Stop. Stop uses a neutral Tabler button and shows
+Stopping until Codex confirms turn completion. It preserves typed text, reports interruption
+failures with a retry, and remains scoped to its original chat when the user changes email.
 
 ## Search with Codex
+
+Installed Dispatch keeps its Codex runtime current automatically using stable OpenAI releases. Checks run at launch and every six hours while the background agent is running; failed checks retry after fifteen minutes. Downloads are verified before use, activation waits for all Codex work to finish, and failed startup restores the working runtime. Models come from that runtime's account catalog, so new releases need no Dispatch rebuild or separate login. Explicit runtime overrides remain available for pinned installations.
 
 Typing in Search keeps the instant indexed filter. Enter or the adjacent Tabler sparkles button submits a natural-language search to the existing unbound Codex task. The selected account is the search scope; All inboxes searches connected accounts across mail folders. Unsaved drafts must be saved successfully before navigating into search.
 

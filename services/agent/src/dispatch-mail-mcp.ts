@@ -6,10 +6,20 @@ import { z } from 'zod'
 const identity = { accountId: z.string().min(1), draftId: z.string().min(1) }
 const attachment = z.object({ id: z.string().optional(), name: z.string(), mediaType: z.string(), contentBase64: z.string().optional(), sourceMessageId: z.string().optional(), sizeLabel: z.string().optional() })
 const fields = { to: z.array(z.string()).optional(), cc: z.array(z.string()).optional(), bcc: z.array(z.string()).optional(), subject: z.string().optional(), bodyMarkdown: z.string().optional(), attachments: z.array(attachment).optional() }
-type Draft = { id: string; accountId: string; inReplyToMessageId: string; to: { address: string }[]; cc: string; bcc: string; subject: string; bodyMarkdown: string; attachments: unknown[] }
+type Draft = { syncState?: 'pending' | 'failed'; resolvedFromDraftId?: string; id: string; accountId: string; inReplyToMessageId: string; to: { address: string }[]; cc: string; bcc: string; subject: string; bodyMarkdown: string; attachments: unknown[] }
 
 export function dispatchMailConfig() {
-  return { 'mcp_servers.dispatch_mail': { url: `http://127.0.0.1:${process.env.DISPATCH_AGENT_PORT ?? '8412'}/mcp/dispatch-mail`, tool_timeout_sec: 90 } }
+  return { 'mcp_servers.dispatch_mail': {
+    url: `http://127.0.0.1:${process.env.DISPATCH_AGENT_PORT ?? '8412'}/mcp/dispatch-mail`, tool_timeout_sec: 90,
+    // Draft edits are authorized by the user's draft request and do not send mail.
+    // Explicit per-tool approval also works in older chats with policy "never".
+    tools: {
+      create_draft: { approval_mode: 'approve' },
+      update_draft: { approval_mode: 'approve' },
+      attach_files: { approval_mode: 'approve' },
+      resolve_draft_conflict: { approval_mode: 'approve' },
+    },
+  } }
 }
 
 /** MCP transport adapter over the same mail-service commands used by the editor. */
@@ -24,7 +34,7 @@ export function createDispatchMailMcp(mailBase = `http://127.0.0.1:${process.env
   const draftPath = (accountId: string, draftId: string) => `/v1/drafts/${encodeURIComponent(draftId)}?account=${encodeURIComponent(accountId)}`
   async function read(accountId: string, draftId: string): Promise<Draft> {
     const draft = (await request(draftPath(accountId, draftId))).draft as Draft | undefined
-    if (!draft || draft.id !== draftId || draft.accountId !== accountId) throw new Error('Dispatch returned a different draft or account')
+    if (!draft || (draft.id !== draftId && draft.resolvedFromDraftId !== draftId) || draft.accountId !== accountId) throw new Error('Dispatch returned a different draft or account')
     return draft
   }
   async function result(operation: () => Promise<Record<string, unknown>>) {
@@ -45,29 +55,22 @@ export function createDispatchMailMcp(mailBase = `http://127.0.0.1:${process.env
   }, input => result(() => request('/v1/search-results', 'POST', input)))
   server.registerTool('list_send_receipts', { description: 'Read Dispatch’s persisted send outcomes, including unknown outcomes and verified recipients/files. This does not send or retry email.', inputSchema: {}, annotations: readonly }, () => result(() => request('/v1/send-receipts')))
   server.registerTool('read_draft', { description: 'Read the exact Gmail draft through Dispatch, including To, Cc, Bcc, body, and attachments. This does not change or send it.', inputSchema: identity, annotations: readonly }, ({ accountId, draftId }) => result(async () => ({ draft: await read(accountId, draftId) })))
-  server.registerTool('create_draft', { description: 'Create a Gmail draft through Dispatch and open the saved draft in the editor. Creating a draft does not send it.', inputSchema: { accountId: identity.accountId, messageId: z.string().optional(), ...fields }, annotations: write }, ({ accountId, messageId, ...input }) => result(() => request('/v1/drafts', 'POST', {
+  server.registerTool('create_draft', { description: 'Save a new unsent draft durably in Dispatch and open it in the editor immediately. It retries Gmail saves after reconnection. syncState pending means saved on this device only; read_draft confirms Gmail when syncState is absent. Creating a draft does not send it.', inputSchema: { accountId: identity.accountId, messageId: z.string().optional(), clientDraftId: z.string().uuid().describe('A fresh UUID for this new draft. Reuse it for retries of the same creation; use a new UUID for another draft.'), ...fields }, annotations: write }, ({ accountId, messageId, ...input }) => result(() => request('/v1/draft-saves', 'POST', {
     accountId, messageId: messageId ?? '', ...input, to: input.to?.join(', ') ?? '', cc: input.cc?.join(', ') ?? '', bcc: input.bcc?.join(', ') ?? '', bodyMarkdown: input.bodyMarkdown ?? '',
   })))
-  server.registerTool('update_draft', { description: 'Change only the supplied fields of a saved Dispatch/Gmail draft. Omitted recipients, body, and attachments are preserved. For an address-only correction supply just accountId, draftId, and to. The updated draft opens in the editor. Does not send.', inputSchema: { ...identity, ...fields }, annotations: write }, ({ accountId, draftId, ...input }) => result(async () => {
-    const previous = await read(accountId, draftId)
-    if (input.bodyMarkdown === undefined && input.attachments === undefined) {
-      return request(draftPath(accountId, draftId), 'PATCH', { accountId,
-        ...input.to === undefined ? {} : { to: input.to.join(', ') },
-        ...input.cc === undefined ? {} : { cc: input.cc.join(', ') },
-        ...input.bcc === undefined ? {} : { bcc: input.bcc.join(', ') },
-        ...input.subject === undefined ? {} : { subject: input.subject },
-      })
-    }
-    return request(draftPath(accountId, draftId), 'PUT', {
-      accountId, messageId: previous.inReplyToMessageId,
-      to: input.to?.join(', ') ?? previous.to.map(item => item.address).join(', '),
-      cc: input.cc?.join(', ') ?? previous.cc, bcc: input.bcc?.join(', ') ?? previous.bcc,
-      subject: input.subject ?? previous.subject, bodyMarkdown: input.bodyMarkdown ?? previous.bodyMarkdown,
-      attachments: input.attachments ?? previous.attachments,
-    })
-  }))
+  server.registerTool('update_draft', { description: 'Save supplied draft changes durably in Dispatch and open them in the editor. Omitted recipients, body and attachments are preserved. Retries safely after reconnection. syncState pending means saved on this device only; read_draft confirms Gmail when syncState is absent. Does not send.', inputSchema: { ...identity, ...fields }, annotations: write }, ({ accountId, draftId, ...input }) => result(() => request('/v1/draft-saves', 'POST', {
+    accountId, draftId, ...input,
+    ...input.to === undefined ? {} : { to: input.to.join(', ') },
+    ...input.cc === undefined ? {} : { cc: input.cc.join(', ') },
+    ...input.bcc === undefined ? {} : { bcc: input.bcc.join(', ') },
+  })))
+  server.registerTool('resolve_draft_conflict', {
+    description: 'Resolve a same-field Gmail draft conflict using the version the user chose. Read the current draft and both versions first. keep-local retries the accepted local changes against the Gmail version; use-remote keeps the Gmail version. Both snapshots are archived before the choice. Supply the draftRevision from read_draft so an older choice cannot replace newer edits. This does not send email.',
+    inputSchema: { ...identity, choice: z.enum(['keep-local', 'use-remote']), expectedRevision: z.number().int().min(1) }, annotations: write,
+  }, ({ accountId, draftId, choice, expectedRevision }) => result(() => request(`/v1/draft-saves/${encodeURIComponent(draftId)}/conflict`, 'POST', { accountId, choice, expectedRevision })))
   server.registerTool('send_draft', { description: 'Send this exact saved draft through Dispatch. First verifies its account and at least one recipient; does not rewrite the draft. Returns Gmail’s delivery receipt. Do not retry an uncertain send without checking Sent.', inputSchema: identity, annotations: { ...write, destructiveHint: true, idempotentHint: false } }, ({ accountId, draftId }) => result(async () => {
     const draft = await read(accountId, draftId)
+    if (draft.syncState) throw new Error('Draft is still syncing. Nothing was sent.')
     if (!draft.to?.some(item => item.address.trim()) && !draft.cc?.trim() && !draft.bcc?.trim()) throw new Error('Add a recipient before sending')
     const response = await request(`/v1/drafts/${encodeURIComponent(draftId)}?action=send&account=${encodeURIComponent(accountId)}`, 'POST')
     const delivery = response.delivery as Record<string, unknown> | undefined
@@ -76,9 +79,9 @@ export function createDispatchMailMcp(mailBase = `http://127.0.0.1:${process.env
     return { id: receipt.id, accountId, draftId, delivery, receipt: response.receipt }
   }))
   server.registerTool('attach_files', {
-    description: 'Attach local files to an existing Gmail draft using absolute paths. Appends to existing attachments, preserves the formatted body and recipients, and verifies saved file bytes in Gmail. Returns verified filenames, sizes, and SHA-256 hashes. Does not send. If verification fails, inspect the saved draft before retrying.',
-    inputSchema: { ...identity, paths: z.array(z.string().min(1)).min(1) }, annotations: write,
-  }, ({ accountId, draftId, paths }) => result(() => request(`/v1/drafts/${encodeURIComponent(draftId)}/attachments`, 'POST', { accountId, paths })))
+    description: 'Append local files to a Gmail draft or a locally queued draft creation using absolute paths. Supply a fresh operationId UUID and reuse it if this call has an uncertain result. Dispatch stages the bytes durably before acceptance, serializes the append with editor saves, preserves recipients and formatted body/CID references, and verifies exact saved bytes before reporting confirmed files. A pending result means the files are saved on this device and still waiting for Gmail; read_draft can check the draft later. Does not send.',
+    inputSchema: { ...identity, operationId: z.string().uuid().describe('A fresh UUID for this append operation. Reuse this exact UUID when retrying the same append.'), paths: z.array(z.string().min(1)).min(1) }, annotations: write,
+  }, ({ accountId, draftId, operationId, paths }) => result(() => request(`/v1/drafts/${encodeURIComponent(draftId)}/attachments`, 'POST', { accountId, operationId, paths })))
   return server
 }
 

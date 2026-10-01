@@ -1,3 +1,4 @@
+import DOMPurify from 'dompurify'
 import { installWebLinks } from './web-links.js'
 import { DraftRecovery, type RecoveryDraft } from './draft-recovery.js'
 import { resultExcerpt, highlightPassage } from './search-highlights.js'
@@ -25,7 +26,7 @@ const theme = createThemeController({
     }
   },
 })
-import type { MailboxCounts, OfflineStatus, SearchResults, SearchResult, AppSummary, ConversationProjection, DispatchModel, DispatchModelCatalog, ConversationSummary, DraftProjection, GmailAccount, GmailConversationAction, GmailMailbox, MailAddress, MailStateFilter, MessageProjection } from './contracts.js'
+import type { MailboxCounts, OfflineStatus, SearchResults, SearchResult, ExecutionPreferences, AppSummary, ConversationProjection, DispatchModel, DispatchModelCatalog, ConversationSummary, DraftProjection, GmailAccount, GmailConversationAction, GmailMailbox, MailAddress, MailStateFilter, MessageProjection } from './contracts.js'
 import { createContextMenuPopup } from './context-menu-popup.js'
 import { createMarkReadDwell } from './mark-read-dwell.js'
 import { gmailAppId, isNativeShell } from './model.js'
@@ -35,12 +36,23 @@ import { arrivedUnreadIds, liveListBaseline, playNewMailTone, type LiveListBasel
 import { CONVERSATION_DRAG_TYPE, EMPTY_SELECTION, decodeDragPayload, dropActionForMailbox, encodeDragPayload, moveLabel, pruneSelection, selectionAfterArrow, selectionAfterClick, undoActionsFor, type SelectionState } from './selection.js'
 import { SHORTCUT_GROUPS, TOOLBAR_KEYS, resolveShortcut } from './shortcuts.js'
 import { describeRequestError, requestErrorCode } from './request-errors.js'
+import { waitingForGmailLabel } from './sync-label.js'
 import { threadContextMenuItems } from './thread-context-menu.js'
+import { canOpenMessageWindow, MESSAGE_WINDOW_CHANNEL, messageWindowQuery, parseMessageWindow, readMovedInMessageWindow, type MessageWindowTarget, type MovedInMessageWindow } from './message-window.js'
+import { DraftEditLocks, type LockManagerLike } from './draft-edit-locks.js'
+import { installRichDraftEditor } from './rich-draft-editor.js'
 
 const appElement = document.querySelector<HTMLDivElement>('#app')
 if (!appElement) throw new Error('Dispatch app root is missing')
 const app: HTMLDivElement = appElement
 if (isNativeShell(window as { isTauri?: unknown })) document.documentElement.classList.add('dispatch-native')
+// A message window shows one conversation that the main window opened on double-click or Open in New Window.
+let messageWindow: MessageWindowTarget | undefined
+let messageWindowAddressError: string | undefined
+try { messageWindow = parseMessageWindow(location.search) } catch (error) { messageWindowAddressError = error instanceof Error ? error.message : String(error) }
+const inMessageWindow = Boolean(messageWindow || messageWindowAddressError)
+if (inMessageWindow) document.documentElement.classList.add('dispatch-message-window')
+const messageWindowChannel = 'BroadcastChannel' in window ? new BroadcastChannel(MESSAGE_WINDOW_CHANNEL) : undefined
 const popupContextMenu = createContextMenuPopup(window as Window & { isTauri?: unknown; __TAURI__?: { core?: { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> } } })
 
 app.innerHTML = `
@@ -86,8 +98,9 @@ app.innerHTML = `
         <div class="dispatch-search-status" data-search-status hidden><span data-search-summary role="status"></span><button class="btn btn-sm btn-ghost-secondary" type="button" data-clear-search aria-label="Return to mailbox">Clear</button></div>
         <div class="list-group list-group-flush dispatch-message-list" data-message-list></div>
         <div class="alert alert-danger m-3 dispatch-pane-error" role="alert" data-mail-error hidden></div>
+        <div class="m-3" data-mail-reconnect hidden><button class="btn btn-outline-primary" data-reconnect-account><i class="ti ti-plug-connected me-1"></i>Reconnect Gmail</button><span class="ms-2 text-secondary" data-reconnect-status></span></div>
         <footer class="dispatch-mail-activity"><div class="dispatch-activity-status">        <span class="dispatch-sync" data-sync-state="idle"><span class="dispatch-sync-dot" aria-hidden="true"></span><span class="text-secondary" data-mail-source>Loading</span></span>
-        <button class="btn btn-icon btn-ghost-secondary btn-sm" type="button" data-refresh aria-label="Refresh" title="Refresh Gmail"><i class="ti ti-refresh" aria-hidden="true"></i></button></div><button class="btn btn-sm" data-activity-toggle aria-expanded="false" aria-controls="dispatch-activity"><i class="ti ti-activity" aria-hidden="true"></i><span>Mail activity</span></button><div class="dispatch-activity-popover" id="dispatch-activity" hidden><strong>Mail activity</strong><div class="dispatch-activity-options"><button type="button" class="nav-link" data-offline-open><i class="ti ti-cloud-down" aria-hidden="true"></i><span>Offline</span></button></div><p class="small text-secondary mb-0">Downloaded mail</p></div></footer>
+        <button class="btn btn-icon btn-ghost-secondary btn-sm" type="button" data-refresh aria-label="Refresh" title="Refresh Gmail"><i class="ti ti-refresh" aria-hidden="true"></i></button></div><button class="btn btn-sm" data-activity-toggle aria-expanded="false" aria-controls="dispatch-activity"><i class="ti ti-activity" aria-hidden="true"></i><span>Mail activity</span></button><div class="dispatch-activity-popover" id="dispatch-activity" hidden><strong>Mail activity</strong><div class="dispatch-activity-options"><button type="button" class="nav-link" data-gmail-sync-open><i class="ti ti-brand-google" aria-hidden="true"></i><span>Gmail sync</span></button><button type="button" class="nav-link" data-offline-open><i class="ti ti-cloud-down" aria-hidden="true"></i><span>Offline</span></button></div><p class="small text-secondary mb-0">Downloaded mail</p></div></footer>
       </aside>
       <div class="dispatch-divider" data-divider="messages" role="separator" tabindex="0" aria-label="Resize messages panel" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="640"><i class="ti ti-grip-vertical" aria-hidden="true"></i></div>
       <main class="card rounded-0 border-0 dispatch-reader" aria-label="Selected email">
@@ -117,35 +130,62 @@ app.innerHTML = `
             </div>
             <div class="dispatch-thread-meta" data-thread-meta><span class="dispatch-account-dot" data-account-dot hidden aria-hidden="true"></span><span data-address hidden></span><span class="dispatch-meta-sep" data-account-sep hidden>·</span><span data-thread-mailbox></span><span class="dispatch-meta-sep" data-count-sep hidden>·</span><span data-message-count hidden></span><span class="dispatch-copy-chip" data-copy-status data-mode="live" hidden role="status"><i class="ti ti-cloud-down" aria-hidden="true"></i><span data-copy-label></span></span><button type="button" class="btn btn-sm btn-ghost-primary dispatch-thread-files-toggle" data-thread-files-toggle aria-expanded="false" aria-controls="dispatch-thread-files" hidden></button></div>
           </header>
+          <div class="dispatch-thread-completeness" data-thread-completeness hidden role="status"><span data-thread-completeness-text></span><button class="btn btn-sm btn-ghost-primary" type="button" data-refresh-thread-completeness>Refresh thread</button></div>
           <article class="dispatch-email-body" data-body></article>
           <section class="dispatch-attachments" data-attachments></section>
           <section class="card-body dispatch-draft" data-draft hidden>
-            <div class="card"><div class="card-header"><div><strong>Unsent draft</strong><span class="text-secondary small ms-2">Not sent</span></div><button type="button" class="btn btn-sm btn-ghost-secondary" data-collapse-draft aria-expanded="true" aria-controls="dispatch-draft-content"><i class="ti ti-chevron-down me-1" aria-hidden="true"></i>Collapse draft</button></div><div id="dispatch-draft-content" data-draft-content><div class="card-body">
-            <label class="form-label">From<select class="form-select mt-1" data-draft-account aria-label="Draft account"></select></label>
-            <label class="form-label">To<div class="dispatch-recipient-field mt-1" data-recipient-field><div class="dispatch-recipient-chips"></div><input class="form-control" data-draft-to aria-label="Draft recipient" autocomplete="off"><ul class="dispatch-recipient-suggestions" hidden role="listbox" aria-label="Recipient suggestions"></ul></div></label>
-            <div class="row g-3 mt-0"><label class="col form-label">Cc<div class="dispatch-recipient-field mt-1" data-recipient-field><div class="dispatch-recipient-chips"></div><input class="form-control" data-draft-cc aria-label="Draft Cc" autocomplete="off"><ul class="dispatch-recipient-suggestions" hidden role="listbox" aria-label="Cc suggestions"></ul></div></label><label class="col form-label">Bcc<div class="dispatch-recipient-field mt-1" data-recipient-field><div class="dispatch-recipient-chips"></div><input class="form-control" data-draft-bcc aria-label="Draft Bcc" autocomplete="off"><ul class="dispatch-recipient-suggestions" hidden role="listbox" aria-label="Bcc suggestions"></ul></div></label></div>
-            <label class="form-label">Subject<input class="form-control mt-1" data-draft-subject aria-label="Draft subject"></label>
-            <label class="form-label">Message<textarea class="form-control mt-1" data-draft-body aria-label="Draft body"></textarea></label>
-            <p class="text-secondary small" data-recovery-status role="status"></p>
+            <div class="card"><div class="card-header"><div class="dispatch-draft-title"><strong>Unsent draft</strong><span class="text-secondary small" data-recovery-status role="status"></span></div><div class="dispatch-draft-header-actions"><button type="button" class="btn btn-sm btn-ghost-secondary" data-pop-out-draft aria-label="Open draft in new window" title="Open draft in new window"><i class="ti ti-external-link" aria-hidden="true"></i></button><button type="button" class="btn btn-sm btn-ghost-secondary" data-toggle-preview aria-pressed="false" aria-controls="dispatch-draft-preview"><i class="ti ti-eye me-1" aria-hidden="true"></i>Preview</button><button type="button" class="btn btn-sm btn-ghost-secondary" data-collapse-draft aria-expanded="true" aria-controls="dispatch-draft-content"><i class="ti ti-chevron-down me-1" aria-hidden="true"></i>Collapse draft</button></div></div><div id="dispatch-draft-content" data-draft-content><div class="card-body">
+            <div class="dispatch-draft-fields">
+              <div class="dispatch-draft-field"><label class="dispatch-draft-label" for="dispatch-draft-to">To</label><div class="dispatch-recipient-field" data-recipient-field><div class="dispatch-recipient-chips"></div><input class="form-control" id="dispatch-draft-to" data-draft-to aria-label="Draft recipient" autocomplete="off"><ul class="dispatch-recipient-suggestions" hidden role="listbox" aria-label="Recipient suggestions"></ul></div><span class="dispatch-draft-copy-toggles"><button type="button" class="btn btn-sm btn-ghost-secondary" data-show-copy="cc" aria-label="Add Cc" aria-controls="dispatch-draft-cc-row">Cc</button><button type="button" class="btn btn-sm btn-ghost-secondary" data-show-copy="bcc" aria-label="Add Bcc" aria-controls="dispatch-draft-bcc-row">Bcc</button></span></div>
+              <div class="dispatch-draft-field" id="dispatch-draft-cc-row" data-copy-row="cc" hidden><label class="dispatch-draft-label" for="dispatch-draft-cc">Cc</label><div class="dispatch-recipient-field" data-recipient-field><div class="dispatch-recipient-chips"></div><input class="form-control" id="dispatch-draft-cc" data-draft-cc aria-label="Draft Cc" autocomplete="off"><ul class="dispatch-recipient-suggestions" hidden role="listbox" aria-label="Cc suggestions"></ul></div></div>
+              <div class="dispatch-draft-field" id="dispatch-draft-bcc-row" data-copy-row="bcc" hidden><label class="dispatch-draft-label" for="dispatch-draft-bcc">Bcc</label><div class="dispatch-recipient-field" data-recipient-field><div class="dispatch-recipient-chips"></div><input class="form-control" id="dispatch-draft-bcc" data-draft-bcc aria-label="Draft Bcc" autocomplete="off"><ul class="dispatch-recipient-suggestions" hidden role="listbox" aria-label="Bcc suggestions"></ul></div></div>
+              <div class="dispatch-draft-field"><label class="dispatch-draft-label" for="dispatch-draft-subject">Subject</label><input class="form-control" id="dispatch-draft-subject" data-draft-subject aria-label="Draft subject"></div>
+              <div class="dispatch-draft-field"><label class="dispatch-draft-label" for="dispatch-draft-account">From</label><select class="form-select" id="dispatch-draft-account" data-draft-account aria-label="Draft account"></select></div>
+            </div>
+            <div class="dispatch-draft-formatting" role="toolbar" aria-label="Message formatting">
+              <button type="button" class="btn btn-sm btn-icon btn-ghost-secondary" data-draft-format="bold" aria-label="Bold" title="Bold (⌘B)"><i class="ti ti-bold" aria-hidden="true"></i></button>
+              <button type="button" class="btn btn-sm btn-icon btn-ghost-secondary" data-draft-format="italic" aria-label="Italic" title="Italic (⌘I)"><i class="ti ti-italic" aria-hidden="true"></i></button>
+              <button type="button" class="btn btn-sm btn-icon btn-ghost-secondary" data-draft-format="underline" aria-label="Underline" title="Underline (⌘U)"><i class="ti ti-underline" aria-hidden="true"></i></button>
+              <button type="button" class="btn btn-sm btn-icon btn-ghost-secondary" data-draft-format="insertUnorderedList" aria-label="Bulleted list"><i class="ti ti-list" aria-hidden="true"></i></button>
+              <button type="button" class="btn btn-sm btn-icon btn-ghost-secondary" data-draft-format="insertOrderedList" aria-label="Numbered list"><i class="ti ti-list-numbers" aria-hidden="true"></i></button>
+              <button type="button" class="btn btn-sm btn-icon btn-ghost-secondary" data-draft-link aria-label="Insert link"><i class="ti ti-link" aria-hidden="true"></i></button>
+              <button type="button" class="btn btn-sm btn-icon btn-ghost-secondary" data-draft-format="removeFormat" aria-label="Clear formatting"><i class="ti ti-clear-formatting" aria-hidden="true"></i></button>
+            </div>
+            <div class="dispatch-draft-link-form" data-draft-link-form hidden><input class="form-control form-control-sm" type="url" data-draft-link-url aria-label="Link URL" placeholder="https://"><button class="btn btn-sm" type="button" data-draft-link-apply>Apply link</button><button class="btn btn-sm" type="button" data-draft-link-cancel>Cancel link</button></div>
+            <div class="form-control dispatch-draft-text" data-draft-body role="textbox" aria-multiline="true" contenteditable="true" aria-label="Draft body" data-placeholder="Write your message"></div>
+            <section class="dispatch-draft-conflict" data-draft-conflict hidden role="group" aria-label="Gmail draft conflict">
+              <div class="dispatch-draft-conflict-heading"><strong>Gmail changed this draft</strong><span data-draft-conflict-summary></span></div>
+              <pre class="dispatch-draft-conflict-remote" data-draft-conflict-remote aria-label="Gmail version"></pre>
+              <div class="dispatch-draft-conflict-actions"><button class="btn btn-sm btn-ghost-secondary" type="button" data-use-gmail-version>Use Gmail version</button><button class="btn btn-sm btn-primary" type="button" data-keep-local-edits>Keep my edits</button></div>
+            </section>
             <ul class="dispatch-draft-attachments" data-draft-attachments aria-label="Draft attachments" hidden></ul>
-            <div class="dispatch-draft-preview markdown" data-draft-preview aria-label="Draft preview"></div>
+            <div class="dispatch-draft-preview markdown" id="dispatch-draft-preview" data-draft-preview aria-label="Draft preview" hidden></div>
             <p class="text-secondary small" data-draft-error hidden></p>
             <div class="alert alert-warning" data-send-confirm hidden>
               <p data-send-confirm-text></p>
               <button class="btn btn-outline-secondary" type="button" data-send-cancel>Cancel</button>
               <button class="btn btn-primary" type="button" data-send-confirm-go>Send now</button>
             </div>
-            </div><footer class="card-footer d-flex flex-wrap gap-2"><button class="btn btn-outline-danger" type="button" data-discard-draft>Discard</button><button class="btn btn-outline-secondary" type="button" data-attach-draft>Attach</button><input type="file" data-draft-files multiple hidden><button class="btn btn-outline-secondary" type="button" data-save-draft>Save draft</button><button class="btn btn-outline-secondary" type="button" data-revise-draft><i class="ti ti-sparkles me-1" aria-hidden="true"></i>Ask Codex to revise</button><button class="btn btn-primary ms-auto" type="button" data-send-draft><i class="ti ti-send me-1" aria-hidden="true"></i>Send draft</button></footer></div>
+            </div><footer class="card-footer d-flex flex-wrap align-items-center gap-1"><button class="btn btn-ghost-danger" type="button" data-discard-draft><i class="ti ti-trash me-1" aria-hidden="true"></i>Discard</button><button class="btn btn-ghost-secondary" type="button" data-attach-draft><i class="ti ti-paperclip me-1" aria-hidden="true"></i>Attach</button><input type="file" data-draft-files multiple hidden><button class="btn btn-ghost-secondary" type="button" data-revise-draft><i class="ti ti-sparkles me-1" aria-hidden="true"></i>Ask Codex to revise</button><button class="btn btn-ghost-secondary ms-auto" type="button" data-save-draft>Save draft</button><button class="btn btn-primary" type="button" data-send-draft><i class="ti ti-send me-1" aria-hidden="true"></i>Send draft</button></footer></div>
             </div>
           </section>
         </div>
       </main>
       <div class="dispatch-divider" data-divider="agent" role="separator" tabindex="0" aria-label="Resize Codex panel" aria-orientation="vertical" aria-valuemin="280" aria-valuemax="900"><i class="ti ti-grip-vertical" aria-hidden="true"></i></div>
       <aside class="card rounded-0 border-0 dispatch-agent" aria-label="Codex">
+        <header class="dispatch-agent-header"><span class="dispatch-agent-heading"><i class="ti ti-sparkles" aria-hidden="true"></i>Codex <span class="dispatch-agent-context" data-codex-context>· This email</span></span><span class="dispatch-agent-connections"><span class="dispatch-status-dot" data-connector data-ready="false" title="Checking connectors" aria-label="Checking connectors"></span><span class="dispatch-status-dot" data-agent-status data-status="Connecting" title="Connecting" aria-label="Connecting"></span></span><button class="btn btn-sm btn-icon btn-ghost-secondary" type="button" data-setup-open aria-label="Codex settings" title="Codex settings and connection"><i class="ti ti-settings" aria-hidden="true"></i></button></header>
         <div class="dispatch-agent-stream" data-agent-stream><p class="dispatch-agent-intro">Use the installed Codex harness with your selected email in view.</p></div>
         <footer class="card-footer">
-          <p class="dispatch-agent-state-text" data-agent-state-text role="status" hidden></p><div class="dispatch-suggestions"><button class="btn btn-sm btn-ghost-secondary" type="button" data-suggestion="Catch me up on this email.">Catch me up</button><button class="btn btn-sm btn-ghost-secondary" type="button" data-suggestion="Draft a reply to this email.">Draft a reply</button><button class="btn btn-sm btn-ghost-secondary" type="button" data-suggestion="Find related messages in Gmail.">Find related</button></div>
-          <div class="card card-sm dispatch-prompt"><div class="card-body p-2"><textarea class="form-control border-0 shadow-none" data-prompt aria-label="Ask Codex" placeholder="Ask Codex about this email…"></textarea><div class="progress progress-sm mt-2" data-agent-activity aria-label="Codex is working" hidden><div class="progress-bar progress-bar-indeterminate bg-blue"></div></div><div class="d-flex align-items-center justify-content-between mt-2"><span class="dispatch-prompt-status"><span class="dispatch-status-dot" data-connector data-ready="false" title="Checking connectors" aria-label="Checking connectors"></span><span class="dispatch-status-dot" data-agent-status data-status="Connecting" title="Connecting" aria-label="Connecting" aria-live="polite"></span><button class="btn btn-sm btn-ghost-secondary" type="button" data-setup-open>Setup</button><span class="dispatch-model"><button class="badge bg-blue-lt text-blue border-0 dispatch-model-button" type="button" data-model-toggle aria-haspopup="menu" aria-expanded="false" title="Choose the Codex model and reasoning effort"><span data-model-label>GPT-5.6 Sol · Medium</span><i class="ti ti-chevron-down" aria-hidden="true"></i></button><div class="dropdown-menu dispatch-model-menu" data-model-menu role="menu" hidden><div class="dropdown-header" data-model-summary>Loading models</div><div data-model-list></div><div class="dropdown-divider"></div><div class="dropdown-header">Reasoning effort</div><div class="dispatch-model-efforts" role="group" aria-label="Reasoning effort" data-model-efforts></div></div></span></span><span><button class="btn btn-icon btn-sm btn-outline-danger" type="button" data-stop aria-label="Stop" hidden><i class="ti ti-player-stop-filled" aria-hidden="true"></i></button><button class="btn btn-icon btn-sm btn-primary" type="button" data-send aria-label="Send"><i class="ti ti-arrow-up" aria-hidden="true"></i></button></span></div></div></div>
+          <div class="dispatch-agent-state" role="status" aria-live="polite"><span class="spinner-border spinner-border-sm" data-agent-activity aria-hidden="true" hidden></span><span class="dispatch-agent-state-text" data-agent-state-text hidden></span></div>
+          <div class="card card-sm dispatch-prompt"><div class="card-body p-2">
+            <textarea class="form-control border-0 shadow-none" data-prompt aria-label="Ask Codex" placeholder="Ask Codex about this email…"></textarea>
+            <div class="dispatch-prompt-toolbar">
+              <span class="dispatch-model"><button class="dispatch-model-button" type="button" data-model-toggle aria-label="Codex model and reasoning" aria-haspopup="menu" aria-expanded="false" title="Choose the Codex model and reasoning effort"><span data-model-label>Loading models</span><i class="ti ti-chevron-down" aria-hidden="true"></i></button><div class="dropdown-menu dispatch-model-menu" data-model-menu role="menu" hidden><div class="dropdown-header" data-model-summary>Loading models</div><div data-model-list></div><div class="dropdown-divider"></div><div class="dropdown-header">Reasoning effort</div><div class="dispatch-model-efforts" role="group" aria-label="Reasoning effort" data-model-efforts></div></div></span>
+              <span class="dispatch-permissions"><button class="dispatch-model-button" type="button" data-permissions-toggle aria-label="Codex permissions" aria-haspopup="menu" aria-expanded="false" title="Choose Codex permissions"><i class="ti ti-shield-check dispatch-permissions-shield" aria-hidden="true"></i><span data-permissions-label>Permissions</span><i class="ti ti-chevron-down" aria-hidden="true"></i></button><div class="dropdown-menu dispatch-model-menu dispatch-permissions-menu" data-permissions-menu role="menu" aria-label="Codex permissions" hidden><div class="dropdown-header">Codex permissions</div><div data-permissions-list></div><div class="dropdown-divider"></div><div class="dropdown-header" data-permissions-status role="status" aria-live="polite">Loading saved setting…</div></div></span>
+              <span class="dispatch-prompt-actions"><button class="btn btn-icon btn-sm btn-primary" type="button" data-send aria-label="Send" title="Send to Codex" disabled><i class="ti ti-arrow-up" aria-hidden="true"></i></button><button class="btn btn-icon btn-sm btn-ghost-secondary" type="button" data-stop aria-label="Stop" title="Stop Codex in this email" hidden><i class="ti ti-player-stop" data-stop-icon aria-hidden="true"></i></button></span>
+            </div>
+          </div></div>
+          <div class="dispatch-prompt-helper" data-prompt-helper></div>
         </footer>
       </aside>
     </div>
@@ -197,6 +237,7 @@ app.insertAdjacentHTML('beforeend', `
   <div class="dispatch-sidebar-menu dropdown-menu" role="menu" aria-label="Folder rail style" data-sidebar-menu hidden><button class="dropdown-item" role="menuitemradio" aria-checked="true" data-sidebar-style="compact">Compact</button><button class="dropdown-item" role="menuitemradio" aria-checked="false" data-sidebar-style="expanded">Expanded</button></div>
 
   <dialog class="dispatch-utility-dialog dispatch-shortcuts-dialog" data-shortcuts-dialog aria-label="Keyboard shortcuts"><div class="d-flex justify-content-between align-items-center"><h2 class="m-0">Keyboard shortcuts</h2><span class="text-secondary small">Press <kbd>?</kbd> any time</span><button class="btn btn-sm" data-dialog-close>Close</button></div><div class="dispatch-shortcut-groups" data-shortcut-groups></div><p class="text-secondary small mb-0">Single letters work only with focus in the list or the reader, never inside a text field.</p></dialog>
+  <dialog class="dispatch-utility-dialog" data-gmail-sync-dialog aria-label="Gmail sync"><div class="d-flex justify-content-between"><h2>Gmail sync</h2><button class="btn btn-sm" data-dialog-close>Close</button></div><p data-gmail-sync-status role="status"></p><div data-gmail-sync-accounts></div></dialog>
   <dialog class="dispatch-utility-dialog" data-offline-dialog aria-label="Downloaded mail"><div class="d-flex justify-content-between"><h2>Downloaded mail</h2><button class="btn btn-sm" data-dialog-close>Close</button></div><p>Opened conversations are saved automatically. Download mailbox saves indexed conversations’ full message bodies. Attachments are separate and work offline when already downloaded.</p><label class="form-check"><input class="form-check-input" type="checkbox" data-offline-mode><span class="form-check-label">Use downloaded mail</span></label><p data-offline-status role="status"></p><button class="btn btn-primary btn-sm" data-download-mailbox>Download mailbox</button><button class="btn btn-sm" data-cancel-download hidden>Cancel download</button></dialog>
 `)
 
@@ -213,6 +254,9 @@ const elements = {
   mailboxTitle: app.querySelector<HTMLElement>('[data-mailbox-title]')!,
   account: app.querySelector<HTMLSelectElement>('[data-account]')!,
   mailError: app.querySelector<HTMLElement>('[data-mail-error]')!,
+  mailReconnect: app.querySelector<HTMLElement>('[data-mail-reconnect]')!,
+  reconnectAccount: app.querySelector<HTMLButtonElement>('[data-reconnect-account]')!,
+  reconnectStatus: app.querySelector<HTMLElement>('[data-reconnect-status]')!,
   reader: app.querySelector<HTMLElement>('[data-reader]')!,
   readerEmpty: app.querySelector<HTMLElement>('[data-reader-empty]')!,
   subject: app.querySelector<HTMLElement>('[data-subject]')!,
@@ -229,6 +273,9 @@ const elements = {
   readerMenu: app.querySelector<HTMLElement>('[data-reader-menu]')!,
   body: app.querySelector<HTMLElement>('[data-body]')!,
   threadFilesToggle: app.querySelector<HTMLButtonElement>('[data-thread-files-toggle]')!,
+  threadCompleteness: app.querySelector<HTMLElement>('[data-thread-completeness]')!,
+  threadCompletenessText: app.querySelector<HTMLElement>('[data-thread-completeness-text]')!,
+  refreshThreadCompleteness: app.querySelector<HTMLButtonElement>('[data-refresh-thread-completeness]')!,
   attachments: app.querySelector<HTMLElement>('[data-attachments]')!,
   draft: app.querySelector<HTMLElement>('[data-draft]')!,
   draftTo: app.querySelector<HTMLInputElement>('[data-draft-to]')!,
@@ -236,9 +283,14 @@ const elements = {
   draftBcc: app.querySelector<HTMLInputElement>('[data-draft-bcc]')!,
   draftAccount: app.querySelector<HTMLSelectElement>('[data-draft-account]')!,
   draftSubject: app.querySelector<HTMLInputElement>('[data-draft-subject]')!,
-  draftBody: app.querySelector<HTMLTextAreaElement>('[data-draft-body]')!,
+  draftBody: installRichDraftEditor(app),
   draftPreview: app.querySelector<HTMLElement>('[data-draft-preview]')!,
   draftError: app.querySelector<HTMLElement>('[data-draft-error]')!,
+  draftConflict: app.querySelector<HTMLElement>('[data-draft-conflict]')!,
+  draftConflictSummary: app.querySelector<HTMLElement>('[data-draft-conflict-summary]')!,
+  draftConflictRemote: app.querySelector<HTMLElement>('[data-draft-conflict-remote]')!,
+  useGmailVersion: app.querySelector<HTMLButtonElement>('[data-use-gmail-version]')!,
+  keepLocalEdits: app.querySelector<HTMLButtonElement>('[data-keep-local-edits]')!,
   draftAttachments: app.querySelector<HTMLElement>('[data-draft-attachments]')!,
   draftFiles: app.querySelector<HTMLInputElement>('[data-draft-files]')!,
   discardDraft: app.querySelector<HTMLButtonElement>('[data-discard-draft]')!,
@@ -251,6 +303,8 @@ const elements = {
   connector: app.querySelector<HTMLElement>('[data-connector]')!,
   stream: app.querySelector<HTMLElement>('[data-agent-stream]')!,
   prompt: app.querySelector<HTMLTextAreaElement>('[data-prompt]')!,
+  send: app.querySelector<HTMLButtonElement>('[data-send]')!,
+  promptHelper: app.querySelector<HTMLElement>('[data-prompt-helper]')!,
   searchStatus: app.querySelector<HTMLElement>('[data-search-status]')!,
   searchSummary: app.querySelector<HTMLElement>('[data-search-summary]')!,
   search: app.querySelector<HTMLInputElement>('[data-search]')!,
@@ -264,6 +318,11 @@ const elements = {
   modelSummary: app.querySelector<HTMLElement>('[data-model-summary]')!,
   modelList: app.querySelector<HTMLElement>('[data-model-list]')!,
   modelEfforts: app.querySelector<HTMLElement>('[data-model-efforts]')!,
+  permissionsToggle: app.querySelector<HTMLButtonElement>('[data-permissions-toggle]')!,
+  permissionsLabel: app.querySelector<HTMLElement>('[data-permissions-label]')!,
+  permissionsMenu: app.querySelector<HTMLElement>('[data-permissions-menu]')!,
+  permissionsList: app.querySelector<HTMLElement>('[data-permissions-list]')!,
+  permissionsStatus: app.querySelector<HTMLElement>('[data-permissions-status]')!,
   sync: app.querySelector<HTMLElement>('.dispatch-sync')!,
   stop: app.querySelector<HTMLButtonElement>('[data-stop]')!,
   readState: app.querySelector<HTMLButtonElement>('[data-read-state]')!,
@@ -283,11 +342,51 @@ const elements = {
   setupConnector: app.querySelector<HTMLElement>('[data-setup-connector]')!,
   setupConnectorLabel: app.querySelector<HTMLElement>('[data-setup-connector-label]')!,
 }
+// Cc and Bcc stay folded behind their toggles until they hold an address or the user opens them.
+const copyRows = (['cc', 'bcc'] as const).map(kind => ({
+  row: app.querySelector<HTMLElement>(`[data-copy-row="${kind}"]`)!,
+  toggle: app.querySelector<HTMLButtonElement>(`[data-show-copy="${kind}"]`)!,
+  input: kind === 'cc' ? elements.draftCc : elements.draftBcc,
+}))
 
 installWebLinks(app, window as { isTauri?: unknown }, error => {
   elements.mailError.hidden = false
   elements.mailError.textContent = `Could not open link: ${error instanceof Error ? error.message : String(error)}`
 })
+
+let threadId: string | undefined
+let activeTurnId: string | undefined
+const promptSubmissions = new Set<string>()
+const interruptRequests = new Map<string, { turnId: string; error?: string }>()
+
+function renderAgentComposer(): void {
+  const request = threadId ? interruptRequests.get(threadId) : undefined
+  const stopping = request?.turnId === activeTurnId && request !== undefined && !request.error
+  const stopError = request?.turnId === activeTurnId ? request?.error : undefined
+  const active = Boolean(activeTurnId)
+  const submitting = Boolean(threadId && promptSubmissions.has(threadId))
+  const typed = Boolean(elements.prompt.value.trim())
+  elements.stop.hidden = !active
+  elements.stop.disabled = stopping
+  elements.stop.setAttribute('aria-busy', String(stopping))
+  elements.stop.setAttribute('aria-label', stopping ? 'Stopping Codex' : 'Stop')
+  elements.stop.title = stopping ? 'Stopping Codex' : 'Stop Codex in this email'
+  const stopIcon = elements.stop.querySelector<HTMLElement>('[data-stop-icon]')!
+  stopIcon.className = stopping ? 'spinner-border spinner-border-sm' : 'ti ti-player-stop'
+  elements.send.hidden = active && (!typed || stopping)
+  elements.send.disabled = !typed || stopping || submitting
+  elements.send.dataset.steering = String(active)
+  elements.send.setAttribute('aria-label', active ? 'Update Codex direction' : 'Send')
+  elements.send.title = active ? 'Update Codex direction while it works' : 'Send to Codex'
+  elements.promptHelper.textContent = typed ? (active ? 'Enter to update direction · Shift+Enter for a new line' : 'Enter to send · Shift+Enter for a new line') : ''
+  const status = elements.agentStatus.dataset.status ?? ''
+  const label = elements.agentStatus.getAttribute('aria-label') ?? status
+  const stateText = app.querySelector<HTMLElement>('[data-agent-state-text]')!
+  stateText.hidden = status === 'Connected' && !stopping && !stopError && !submitting
+  stateText.textContent = stopping ? 'Stopping…' : stopError ? `Couldn’t stop: ${stopError}` : submitting && !active ? 'Sending…' : status === 'Working' ? 'Working…' : status === 'Interrupted' ? 'Stopped' : label
+  stateText.parentElement!.dataset.error = String(Boolean(stopError) || status === 'Failed')
+  elements.agentActivity.hidden = !stopping && status !== 'Working' && !submitting
+}
 
 function setAgentStatus(status: string, label = status): void {
   elements.agentStatus.dataset.status = status
@@ -295,8 +394,6 @@ function setAgentStatus(status: string, label = status): void {
   elements.agentStatus.setAttribute('aria-label', label)
   const stateText = app.querySelector<HTMLElement>('[data-agent-state-text]')!
   stateText.dataset.state = status
-  stateText.hidden = status === 'Connected'
-  stateText.textContent = label
   elements.setupAgent.dataset.state = status
   elements.setupAgentLabel.textContent = status === 'Connected' ? 'Codex connected' : label
   renderServiceStatus()
@@ -311,8 +408,7 @@ function setConnectorStatus(label: string, ready: boolean): void {
 }
 
 function renderServiceStatus(): void {
-  const status = elements.agentStatus.dataset.status ?? ''
-  elements.agentActivity.hidden = status !== 'Working'
+  renderAgentComposer()
   const source = elements.mailSource.textContent?.trim() ?? ''
   elements.sync.dataset.syncState = /FAILED|Unavailable/.test(source) ? 'failed' : /^(Syncing|Refreshing)/.test(source) ? 'syncing' : /^(STALE|Partial)/.test(source) ? 'stale' : 'ready'
 }
@@ -321,6 +417,8 @@ new MutationObserver(renderServiceStatus).observe(elements.mailSource, { childLi
 new MutationObserver(renderServiceStatus).observe(elements.agentStatus, { attributes: true, attributeFilter: ['data-status'] })
 renderServiceStatus()
 let activeDraft: DraftProjection | undefined
+let activeForwardOrigin: { accountId: string; messageId: string } | undefined
+let activeDraftReplyMode: { accountId?: string; messageId: string; replyAll: boolean } | undefined
 let draftPreviewTimer: number | undefined
 let draftAutosaveTimer: number | undefined
 let recipientSuggestTimer: number | undefined
@@ -328,7 +426,13 @@ let draftPreviewSequence = 0
 let draftEditSession = 0
 let draftDirty = false
 let draftEditRevision = 0
+let draftBase: DraftProjection | undefined
+let resolvingDraftConflict = false
 function markDraftDirty(): void { draftDirty = true; draftEditRevision += 1; checkpointDraft() }
+
+function sanitizeDraftPreview(html: string): string {
+  return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } })
+}
 // Keep Gmail draft writes in order so a slow save cannot overwrite a newer save.
 let draftSaveFlight: Promise<DraftProjection | undefined> | undefined
 // Keep Gmail send confirmation single-flight.
@@ -336,6 +440,12 @@ let draftSendFlight: Promise<void> | undefined
 let sendConfirmationRevision: number | undefined
 let draftDiscarding = false
 const recovery = new DraftRecovery()
+const draftEditLocks = new DraftEditLocks((navigator as Navigator & { locks?: unknown }).locks as LockManagerLike | undefined)
+const draftWindowTransfers = new Set<string>()
+/** Hold the cross-window claim on whatever this window is editing (see draft-edit-locks.ts). */
+function syncDraftEditLock(): void {
+  draftEditLocks.hold(activeDraft ? { localKey: recoveryKey, accountId: activeDraft.accountId, gmailDraftId: activeDraft.id || undefined } : undefined)
+}
 let draftSyncTimer: number | undefined
 const backgroundDraftSaves = new Map<string, Promise<DraftProjection | undefined>>()
 async function linkDraftTask(key: string, draft: DraftProjection): Promise<void> {
@@ -365,20 +475,34 @@ async function syncPendingDrafts(): Promise<void> {
   if (offlineMode || !navigator.onLine) return
   if (draftSaveFlight) { scheduleDraftSync(); return }
   let pending = false
+  const editedElsewhere = await draftEditLocks.localKeysHeldElsewhere()
   for (const record of recovery.list()) {
     if (!record.accountId || backgroundDraftSaves.has(record.key)) continue
     if (record.key === recoveryKey && activeDraft) {
       if (draftDirty && !draftSaveFlight && !draftSendFlight) autosaveDraft()
       continue
     }
+    // Another window is editing this draft and saves it itself. Try again after that window lets go.
+    if (editedElsewhere.has(record.key) || draftWindowTransfers.has(record.key)) { pending = true; continue }
+    // Only the main window saves drafts that no window is editing.
+    if (inMessageWindow) continue
     if ([record.to, record.cc, record.bcc].flatMap(parseRecipientList).some(address => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))) continue
     const save = (async () => {
       const restored = await recovery.restore(record.key)
       if (restored.missing.length) return
       const current = restored.record
+      if (current.conflict) { pending = true; return undefined }
       if ([current.to, current.cc, current.bcc].flatMap(parseRecipientList).some(address => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))) return
-      const fields = { accountId: current.accountId, messageId: current.inReplyToMessageId, clientDraftId: current.key, to: current.to, cc: current.cc, bcc: current.bcc, subject: current.subject, bodyMarkdown: current.bodyMarkdown, attachments: restored.attachments }
-      const saved = current.gmailDraftId ? await api.updateDraft(current.gmailDraftId, fields) : await api.createDraft('', fields)
+      const base = current.base && current.base.id === current.gmailDraftId ? baselineSnapshot(current.base) : undefined
+      const fields = {
+        accountId: current.accountId, draftId: current.gmailDraftId || undefined, messageId: current.inReplyToMessageId,
+        clientDraftId: current.key, to: current.to, cc: current.cc, bcc: current.bcc, subject: current.subject, bodyMarkdown: current.bodyMarkdown,
+        ...(!current.gmailDraftId || current.attachmentsChanged !== false ? { attachments: restored.attachments } : {}),
+        ...(base ? { base } : {}),
+      }
+      const saved = current.accountId === 'demo'
+        ? current.gmailDraftId ? await api.updateDraft(current.gmailDraftId, fields) : await api.createDraft('', fields)
+        : await api.saveDraft(fields)
       void linkDraftTask(current.key, saved).catch(error => console.error('Draft task binding will need reconnection:', error))
       recovery.bindGmailIdentity(current.key, current.accountId!, saved.id, saved.gmailThreadId)
       recovery.removeSavedRevision(current.key, current.revision)
@@ -406,6 +530,7 @@ async function syncPendingDrafts(): Promise<void> {
 window.addEventListener('online', () => { if (draftSyncTimer !== undefined) window.clearTimeout(draftSyncTimer); draftSyncTimer = undefined; scheduleDraftSync(0) })
 let recoveryKey: string | undefined
 let draftSeed: { fields: string; attachments: DraftProjection['attachments'] } | undefined
+let draftAttachmentsChanged = false
 function editorFields(): string { return JSON.stringify([recipientValue(elements.draftTo), recipientValue(elements.draftCc), recipientValue(elements.draftBcc), elements.draftSubject.value, elements.draftBody.value]) }
 // Older builds persisted network loss as an explicit offline preference.
 // Only a deliberate user choice may disable live Gmail reads and refresh.
@@ -435,7 +560,8 @@ const conversationCache = new Map<string, Promise<ConversationProjection>>()
 const BINDING_CACHE = 'dispatch.codex.bindings.v1'
 type CodexPaneKey = { kind: 'unbound' } | { kind: 'draft'; draftKey: string } | { kind: 'conversation'; accountId: string; gmailThreadId: string }
 const acceptedReadState = new Map<string, boolean>()
-let threadId: string | undefined
+// Explicit Mark as Unread stays unread until the user leaves and selects it again.
+const suppressReadDwell = new Set<string>()
 let desiredCodexKey: CodexPaneKey = { kind: 'unbound' }
 let bindingSequence = 0
 const pendingCodexPrompts = new Map<string, string>()
@@ -472,11 +598,13 @@ function connectTaskActivity(): void {
   if (activityEvents && activityEvents.readyState !== EventSource.CLOSED) return
   activityEvents = api.activity()
   activityEvents.onmessage = event => {
-    for (const task of JSON.parse(event.data) as TaskStatus[]) taskStatuses.set(task.threadId, task)
+    for (const task of JSON.parse(event.data) as TaskStatus[]) {
+      taskStatuses.set(task.threadId, task)
+      if (interruptRequests.get(task.threadId)?.turnId !== task.turnId) interruptRequests.delete(task.threadId)
+    }
     const current = threadId && taskStatuses.get(threadId)
     if (current && codexContextReady) {
       activeTurnId = current.turnId
-      elements.stop.hidden = !activeTurnId
       setAgentStatus(current.status === 'Complete' ? 'Connected' : current.status)
     }
     renderBackgroundTasks()
@@ -491,6 +619,7 @@ function bindingCacheKey(key: CodexPaneKey): string {
 function selectCodexContext(key: CodexPaneKey): void {
   pendingCodexPrompts.set(bindingCacheKey(desiredCodexKey), elements.prompt.value)
   desiredCodexKey = key
+  app.querySelector<HTMLElement>('[data-codex-context]')!.textContent = key.kind === 'conversation' ? '· This email' : key.kind === 'draft' ? '· This draft' : '· General'
   bindingSequence += 1
   paneSequence += 1
   codexContextReady = false
@@ -502,7 +631,6 @@ function selectCodexContext(key: CodexPaneKey): void {
   activeAgentMessage = undefined
   activeAgentText = ''
   activeTurnId = undefined
-  elements.stop.hidden = true
   setAgentStatus('Connecting')
   renderBackgroundTasks()
 }
@@ -529,6 +657,10 @@ function conversationBindingKey(conversation: { accountId?: string; threadId: st
   return { kind: 'conversation', accountId, gmailThreadId: conversation.threadId }
 }
 let apps: AppSummary[] = []
+let executionPreferences: ExecutionPreferences | undefined
+let executionPreferenceError: string | undefined
+let executionPreferenceSaving = false
+let executionPreferenceRequest: Promise<void> | undefined
 let modelCatalog: DispatchModelCatalog | undefined
 let modelCatalogError: string | undefined
 let selectedModelId = localStorage.getItem('dispatch.codex.model') || ''
@@ -558,7 +690,6 @@ let searchQuery = ''
 let acceptChatSearchResults = true
 let searchView: (SearchResults & { phase: 'pending' | 'ready' | 'failed'; error?: string }) | undefined
 let searchTimer: number | undefined
-let activeTurnId: string | undefined
 let codexContextReady = false
 let selectedAttachmentContext: { accountId?: string; threadId: string; messageId: string; attachmentId: string; filename: string } | undefined
 let mobilePanel: PanelName = 'messages'
@@ -595,6 +726,7 @@ const savedSidebar = localStorage.getItem('dispatch.ui.sidebar')
 let mailboxesVisible = savedSidebar !== 'hidden'
 let sidebarStyle: SidebarStyle = (savedSidebar === 'expanded' || (savedSidebar === 'hidden' && localStorage.getItem('dispatch.ui.sidebar.last-visible') === 'expanded')) ? 'expanded' : 'compact'
 let compactMessages = localStorage.getItem('dispatch.ui.density') !== 'comfortable'
+if (inMessageWindow) { panels.messages = false; panels.agent = false; mailboxesVisible = false; mobilePanel = 'reader'; mobileReturnPanel = 'reader' }
 document.documentElement.classList.toggle('dispatch-compact', compactMessages)
 
 function usesMobilePanels(): boolean {
@@ -632,8 +764,8 @@ function renderPanels(): void {
   elements.messagesPanel.hidden = !panels.messages
   elements.readerPanel.hidden = !panels.reader
   elements.agentPanel.hidden = !panels.agent
-  elements.messagesDivider.hidden = !(panels.messages && panels.reader)
-  elements.agentDivider.hidden = !(panels.agent && (panels.reader || panels.messages))
+  elements.messagesDivider.hidden = !(panels.messages && (panels.reader || panels.agent))
+  elements.agentDivider.hidden = !(panels.agent && panels.reader)
 
   let messagesWidth = panels.messagesWidth
   let agentWidth = panels.agentWidth
@@ -653,10 +785,10 @@ function renderPanels(): void {
   if (!elements.messagesDivider.hidden) columns.push('9px')
   if (panels.reader) columns.push(`minmax(${minimumReaderWidth}px, 1fr)`)
   if (!elements.agentDivider.hidden) columns.push('9px')
-  if (panels.agent) columns.push(visible.length === 1 ? 'minmax(0, 1fr)' : `${agentWidth}px`)
+  if (panels.agent) columns.push(!panels.reader ? 'minmax(0, 1fr)' : `${agentWidth}px`)
   elements.workspace.style.gridTemplateColumns = columns.join(' ')
   const messagesCluster = panels.messages && visible.length > 1
-  const agentCluster = panels.agent && visible.length > 1
+  const agentCluster = panels.agent && panels.reader && visible.length > 1
   elements.toolbarMessages.style.width = messagesCluster ? `${railWidth + messagesWidth + 9}px` : ''
   elements.toolbarAgent.style.width = agentCluster ? `${agentWidth + 9}px` : ''
   elements.toolbarMessages.classList.toggle('dispatch-toolbar-cluster-auto', !messagesCluster)
@@ -668,7 +800,7 @@ function renderPanels(): void {
     button.setAttribute('aria-pressed', String(panels[name]))
     button.classList.toggle('active', panels[name])
   })
-  localStorage.setItem('dispatch.panels.v1', JSON.stringify(panels))
+  if (!inMessageWindow) localStorage.setItem('dispatch.panels.v1', JSON.stringify(panels))
 }
 
 /** Dragging a divider this far past its panel's minimum width closes the panel instead of pinning it. */
@@ -759,6 +891,26 @@ function renderList(emptyMessage = defaultEmptyListMessage()): void {
   elements.list.querySelector<HTMLElement>(`[data-conversation-id="${CSS.escape(focusId ?? focusedId)}"]`)?.focus()
 }
 
+async function openLocalDraftWindow(key: string): Promise<void> {
+  if (recoveryKey !== key || !activeDraft) await restoreLocalDraft(key)
+  if (activeDraft && recoveryKey === key) await popOutDraft()
+}
+
+// Checkpoint updates replace local draft rows. Track clicks at their stable parent
+// so a first-click refresh cannot swallow the second click of a double-click.
+let lastDraftRowClick: { key: string; at: number } | undefined
+elements.list.addEventListener('click', event => {
+  const row = (event.target as Element).closest<HTMLElement>('[data-local-draft-key]')
+  const key = row?.dataset.localDraftKey
+  if (!key || event.button !== 0 || event.detail === 0 || event.shiftKey || event.metaKey || event.ctrlKey) { lastDraftRowClick = undefined; return }
+  const at = performance.now()
+  if (lastDraftRowClick?.key === key && at - lastDraftRowClick.at < 500) {
+    lastDraftRowClick = undefined
+    event.preventDefault(); event.stopImmediatePropagation()
+    void openLocalDraftWindow(key).catch(draftError)
+  } else lastDraftRowClick = { key, at }
+}, true)
+
 function renderListRows(emptyMessage: string): void {
   elements.list.innerHTML = ''
   let localDrafts: RecoveryDraft[] = []
@@ -768,14 +920,33 @@ function renderListRows(emptyMessage: string): void {
       for (const record of localDrafts) {
         if (selectedAccountId && record.accountId !== selectedAccountId) continue
         const row = document.createElement('button')
-        row.className = 'list-group-item list-group-item-action dispatch-message'
+        row.className = 'list-group-item list-group-item-action dispatch-message dispatch-local-draft'
         row.dataset.localDraftKey = record.key
         row.type = 'button'
-        const title = document.createElement('strong'); title.textContent = record.subject || 'New message'
-        const detail = document.createElement('small'); detail.textContent = record.to || 'No recipient'
-        if (draftSyncErrors.has(record.key)) { detail.textContent += ' · Could not save'; detail.title = draftSyncErrors.get(record.key)! }
-        row.append(title, document.createElement('br'), detail)
-        row.onclick = () => { void restoreLocalDraft(record.key).catch(draftError) }
+        const avatar = document.createElement('span')
+        avatar.className = 'avatar avatar-sm bg-secondary-lt text-secondary dispatch-avatar'
+        const icon = document.createElement('i'); icon.className = 'ti ti-pencil'; icon.setAttribute('aria-hidden', 'true')
+        avatar.append(icon)
+        const content = document.createElement('span')
+        const top = document.createElement('span'); top.className = 'dispatch-message-top'
+        const to = document.createElement('strong'); to.textContent = `To: ${record.to || 'No recipient'}`; to.title = to.textContent
+        const time = document.createElement('time'); time.dateTime = record.updatedAt
+        time.textContent = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(record.updatedAt))
+        top.append(to, time)
+        const title = document.createElement('b'); title.textContent = record.subject || 'New message'; title.title = title.textContent
+        const detail = document.createElement('small')
+        detail.textContent = draftSyncErrors.has(record.key) ? 'Could not sync to Gmail' : 'Not synced to Gmail'
+        if (draftSyncErrors.has(record.key)) { detail.classList.add('text-danger'); detail.title = draftSyncErrors.get(record.key)! }
+        content.append(top, title, detail)
+        row.setAttribute('aria-label', `Draft to ${record.to || 'no recipient'}, ${record.subject || 'New message'}, ${detail.textContent.toLowerCase()}`)
+        row.append(avatar, content)
+        row.onclick = (event) => { if (event.detail < 2) void restoreLocalDraft(record.key).catch(draftError) }
+        row.ondblclick = () => { void openLocalDraftWindow(record.key).catch(draftError) }
+        row.oncontextmenu = event => {
+          event.preventDefault()
+          void popupContextMenu([{ kind: 'command', id: 'openWindow', label: 'Open in New Window', enabled: true }], { clientX: event.clientX, clientY: event.clientY })
+            .then(chosen => { if (chosen === 'openWindow') return openLocalDraftWindow(record.key) }).catch(draftError)
+        }
         elements.list.append(row)
       }
     } catch (error) { const notice = document.createElement('p'); notice.textContent = `Local drafts could not be read: ${String(error)}`; elements.list.append(notice) }
@@ -848,6 +1019,7 @@ function renderListRows(emptyMessage: string): void {
     if (conversation.accountLabel && accounts.length > 1) content.append(account)
     button.append(avatar, content)
     button.addEventListener('click', (event) => { void handleRowClick(conversation.id, event) })
+    button.addEventListener('dblclick', (event) => { if (!event.shiftKey && !event.metaKey && !event.ctrlKey) void openInMessageWindow(conversation.id) })
     button.addEventListener('dragstart', (event) => startConversationDrag(conversation.id, event))
     button.addEventListener('contextmenu', (event) => {
       event.preventDefault()
@@ -910,6 +1082,22 @@ function renderThreadMeta(summary: Pick<ConversationSummary, 'messageCount' | 'a
   elements.accountSep.hidden = !showAccount
   elements.address.textContent = summary.accountLabel ?? ''
   elements.accountDot.style.background = accountColor(summary.accountId)
+}
+
+let threadRefreshInFlight = false
+let threadRefreshFailed = false
+function renderThreadCompleteness(conversation: ConversationProjection | undefined): void {
+  const completeness = conversation?.completeness
+  const incomplete = completeness?.complete === false
+  elements.threadCompleteness.hidden = !incomplete
+  if (!incomplete) return
+  const shown = completeness.loadedCount
+  const known = completeness.knownCount
+  elements.threadCompletenessText.textContent = threadRefreshFailed
+    ? `Showing ${shown} of at least ${known} messages. More messages could not be loaded; the messages shown remain available.`
+    : `Showing ${shown} of at least ${known} messages. Refresh to check for the rest.`
+  elements.refreshThreadCompleteness.disabled = threadRefreshInFlight
+  elements.refreshThreadCompleteness.textContent = threadRefreshInFlight ? 'Refreshing…' : 'Refresh thread'
 }
 
 function renderThreadMessage(message: MessageProjection, expanded: boolean): HTMLElement {
@@ -1040,25 +1228,6 @@ function renderThreadMessage(message: MessageProjection, expanded: boolean): HTM
   return article
 }
 
-/**
- * Warms the mail cache for every attachment in the thread, newest message
- * first, so opening or previewing one later is instant. Stops as soon as the
- * selection moves on; failures are left for the explicit open to report.
- */
-async function warmAttachments(conversation: ConversationProjection, sequence: number): Promise<void> {
-  const ordered = [...conversation.messages].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
-  for (const message of ordered) {
-    for (const attachment of message.attachments) {
-      if (sequence !== selectionSequence) return
-      try {
-        await api.cacheAttachment(message.id, attachment.id, message.accountId, attachment.name)
-      } catch {
-        // The explicit open reports connector failures; warming stays silent.
-      }
-    }
-  }
-}
-
 async function openAttachment(message: MessageProjection, attachmentId: string, filename: string): Promise<void> {
   selectedAttachmentContext = { accountId: message.accountId, threadId: message.threadId, messageId: message.id, attachmentId, filename }
   try {
@@ -1068,10 +1237,19 @@ async function openAttachment(message: MessageProjection, attachmentId: string, 
 }
 
 async function selectConversation(id: string, options: { revealOnMobile?: boolean; startReadDwell?: boolean; refresh?: boolean } = {}): Promise<void> {
+  const previousId = selectedConversationId
   markReadDwell.cancel()
   const matchResult = searchView?.results.find(result => result.conversation.id === id)
   const summary = matchResult?.conversation ?? conversations.find((conversation) => conversation.id === id)
   if (!summary) return
+  if (options.startReadDwell && previousId !== id) suppressReadDwell.delete(id)
+  const preserveReader = Boolean(options.refresh && id === selectedConversationId && selected)
+  const preserveDraftEditor = Boolean(preserveReader && activeDraft)
+  if (!preserveReader) {
+    threadRefreshFailed = false
+    threadRefreshInFlight = false
+    renderThreadCompleteness(undefined)
+  }
   readerNeedsRetry = false
   // Navigation depends only on a durable local checkpoint. The existing save
   // flight and outbox finish independently of the selected email.
@@ -1095,22 +1273,27 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
   selectedConversationId = id
   selection = { ids: [id], anchor: id }
   selectedSummary = summary
-  selected = undefined
-  activeDraft = undefined
-  recoveryKey = undefined
-  draftEditSession += 1
-  draftDirty = false
-  if (draftPreviewTimer !== undefined) window.clearTimeout(draftPreviewTimer)
-  if (draftAutosaveTimer !== undefined) window.clearTimeout(draftAutosaveTimer)
+  if (!preserveReader) {
+    selected = undefined
+    activeDraft = undefined
+    recoveryKey = undefined
+    syncDraftEditLock()
+    draftEditSession += 1
+    draftDirty = false
+    if (draftPreviewTimer !== undefined) window.clearTimeout(draftPreviewTimer)
+    if (draftAutosaveTimer !== undefined) window.clearTimeout(draftAutosaveTimer)
+  }
   renderList()
   elements.readerEmpty.hidden = true
   elements.reader.hidden = false
-  elements.reader.classList.remove('dispatch-drafting')
-  elements.reader.classList.remove('dispatch-composing')
-  elements.reader.classList.remove('dispatch-multi')
+  if (!preserveDraftEditor) {
+    elements.reader.classList.remove('dispatch-drafting')
+    elements.reader.classList.remove('dispatch-composing')
+    elements.reader.classList.remove('dispatch-multi')
+  }
   elements.body.hidden = false
   renderMailbox()
-  elements.draft.hidden = true
+  if (!preserveDraftEditor) elements.draft.hidden = true
   elements.body.hidden = false
   elements.attachments.hidden = false
   elements.copyStatus.hidden = true
@@ -1119,22 +1302,30 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
   const loading = document.createElement('div')
   loading.className = 'empty text-secondary dispatch-reader-loading'
   loading.textContent = 'Loading conversation…'
-  elements.body.replaceChildren(loading)
-  elements.attachments.replaceChildren()
-  elements.threadFilesToggle.hidden = true
-  if (!offlineMode && options.startReadDwell && summary.unread && summary.accountId) {
+  if (!preserveReader) {
+    elements.body.replaceChildren(loading)
+    elements.attachments.replaceChildren()
+    elements.threadFilesToggle.hidden = true
+  }
+  if (!offlineMode && options.startReadDwell && summary.unread && summary.accountId && !suppressReadDwell.has(id)) {
     const conversationId = summary.id
     markReadDwell.schedule(conversationId, () => { void completeReadDwell(conversationId) })
   }
 
-  if (!offlineMode && !searchView && mailbox === 'drafts' && summary.accountId) {
+  if (!offlineMode && !searchView && mailbox === 'drafts' && summary.accountId && !preserveDraftEditor) {
     try {
       const draft = await api.openDraftFromMessage(summary.accountId, summary.latestMessageId, summary.threadId)
       if (sequence !== selectionSequence || selectedConversationId !== id) return
+      if (await draftEditLocks.heldElsewhere({ accountId: summary.accountId, gmailDraftId: draft.id })) {
+        if (sequence !== selectionSequence || selectedConversationId !== id) return
+        loading.className = 'alert alert-info m-4 dispatch-reader-load-error'
+        loading.textContent = 'This draft is open in another window.'
+        return
+      }
       showDraft(draft, false)
       if (draft.cachedAt) void refreshOpenedDraft(draft, sequence, draftEditRevision)
       try {
-        const key = conversationBindingKey({ accountId: summary.accountId, threadId: summary.threadId })
+        const key: CodexPaneKey = draft.id.startsWith('queued-') ? { kind: 'draft', draftKey: draft.id } : conversationBindingKey({ accountId: summary.accountId, threadId: summary.threadId })
         await bindAndShowCodex(key, { sequence })
       } catch (error) {
         if (sequence !== selectionSequence) return
@@ -1157,7 +1348,7 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
     return
   }
 
-  const key = `${offlineMode ? 'offline:' : ''}${mailbox}:${summary.accountId ?? selectedAccountId ?? ''}:${summary.threadId}`
+  const key = conversationCacheKey(summary)
   let request = conversationCache.get(key)
   if (!request) {
     request = api.readConversation(summary.threadId, summary.accountId ?? selectedAccountId, offlineMode, mailbox)
@@ -1172,6 +1363,7 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
     // accepted commands own the row and toolbar's read state together.
     const currentSummary = conversations.find(item => item.id === id) ?? summary
     selected = { ...conversation, unread: acceptedReadState.get(id) ?? currentSummary.unread }
+    threadRefreshFailed = false
     readerNeedsRetry = !offlineMode && conversation.availability?.mode === 'downloaded'
     renderCopyChip(conversation.availability)
     if (conversation.availability?.mode === 'downloaded') markReadDwell.cancel()
@@ -1179,6 +1371,7 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
     renderReadState(selected.unread)
     elements.subject.textContent = conversation.subject
     renderThreadMeta({ ...conversation, messageCount: conversation.messages.length })
+    renderThreadCompleteness(conversation)
     const newestFirst = [...conversation.messages].sort((left, right) => Date.parse(right.receivedAt) - Date.parse(left.receivedAt))
     elements.body.replaceChildren(...newestFirst.map((message, index) => renderThreadMessage(message, index === 0 || Boolean(matchResult?.hits.some(hit => hit.messageId === message.id)))))
     const attachmentCount = newestFirst.reduce((count, message) => count + message.attachments.length, 0)
@@ -1195,6 +1388,10 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
         expanded.tabIndex = -1
         expanded.focus({ preventScroll: true })
         expanded.scrollIntoView({ block: 'nearest' })
+      }, {
+        status: async (message, attachmentId, name) => (await api.attachmentCacheStatus(message.id, attachmentId, message.accountId, name)).cached,
+        download: async (message, attachmentId, name) => api.cacheAttachment(message.id, attachmentId, message.accountId, name),
+        isCurrent: () => sequence === selectionSequence && selectedConversationId === id,
       })
       const toggle = elements.threadFilesToggle
       const renderDisclosure = () => {
@@ -1231,7 +1428,6 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
         ;(message?.querySelector('mark') ?? message)?.scrollIntoView({ block: 'center' })
       }
     }
-    if (!offlineMode && conversation.availability?.mode !== 'downloaded') void warmAttachments(conversation, sequence)
     prefetchConversations(id)
     if (keepCodex) return
     try {
@@ -1245,6 +1441,11 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
     }
   } catch (error) {
     if (sequence !== selectionSequence) return
+    if (preserveReader) {
+      threadRefreshFailed = true
+      renderThreadCompleteness(selected)
+      return
+    }
     readerNeedsRetry = true
     loading.className = 'alert alert-danger m-4 dispatch-reader-load-error'
     loading.textContent = 'This message is not available yet. Dispatch will retry when Gmail reconnects.'
@@ -1259,14 +1460,14 @@ if (!offlineMode && !String(error).includes('not_downloaded')) window.setTimeout
 }
 
 async function completeReadDwell(conversationId: string): Promise<void> {
-  if (selectedConversationId !== conversationId) return
+  if (selectedConversationId !== conversationId || suppressReadDwell.has(conversationId)) return
   const summary = conversations.find((conversation) => conversation.id === conversationId)
   if (!summary?.accountId || !summary.unread) return
   const actionSequence = readStateActionSequence
   const messageIds = selectedConversationId === conversationId && selected ? selected.messages.map((message) => message.id) : []
   try {
     await api.setConversationUnread(summary.threadId, summary.accountId, false, messageIds)
-    if (selectedConversationId !== conversationId || actionSequence !== readStateActionSequence) return
+    if (selectedConversationId !== conversationId || actionSequence !== readStateActionSequence || suppressReadDwell.has(conversationId)) return
     applyLocalReadState(conversationId, false)
   } catch (error) {
     if (selectedConversationId !== conversationId) return
@@ -1277,6 +1478,8 @@ async function completeReadDwell(conversationId: string): Promise<void> {
 
 function applyLocalReadState(conversationId: string, unread: boolean): void {
   acceptedReadState.set(conversationId, unread)
+  if (unread) suppressReadDwell.add(conversationId)
+  else suppressReadDwell.delete(conversationId)
   dropConversationCache(conversationId)
   if (selectedConversationId === conversationId && selected) selected = { ...selected, unread }
   conversations = conversations
@@ -1287,6 +1490,9 @@ function applyLocalReadState(conversationId: string, unread: boolean): void {
   void refreshMailboxCounts()
 }
 
+function conversationCacheKey(summary: ConversationSummary): string {
+  return `${offlineMode ? 'offline:' : ''}${mailbox}:${summary.accountId ?? selectedAccountId ?? ''}:${summary.threadId}`
+}
 function dropConversationCache(conversationId: string): void {
   const threadId = (selectedConversationId === conversationId ? selected?.threadId : undefined)
     ?? conversations.find((conversation) => conversation.id === conversationId)?.threadId
@@ -1349,7 +1555,84 @@ async function toggleReadState(): Promise<void> {
 
 function askCodex(): void {
   if (usesMobilePanels()) { mobilePanel = 'agent'; mobileReturnPanel = 'agent'; renderPanels() }
+  else if (!panels.agent) { panels.agent = true; renderPanels() }
   elements.prompt.focus()
+}
+
+/** Double-click or Open in New Window: the conversation opens in its own window, as in Mail. */
+async function openInMessageWindow(id: string): Promise<void> {
+  const from = mailbox
+  if (inMessageWindow || !canOpenMessageWindow(from)) return
+  if (from === 'drafts') {
+    if (!activeDraft || selectedConversationId !== id) await selectConversation(id)
+    if (activeDraft) await popOutDraft()
+    return
+  }
+  // The open conversation may have left the list (moved elsewhere, or a refresh dropped it) and still opens.
+  const summary = listedConversations().find((item) => item.id === id) ?? (selectedSummary?.id === id ? selectedSummary : undefined)
+  if (!summary) {
+    elements.mailError.hidden = false
+    elements.mailError.textContent = 'This conversation is no longer listed. Refresh and try again.'
+    return
+  }
+  const target: MessageWindowTarget = { conversationId: summary.id, threadId: summary.threadId, mailbox: from, ...(summary.accountId ? { accountId: summary.accountId } : {}) }
+  try {
+    // Windows keep each other's open drafts safe with Web Locks (draft-edit-locks.ts).
+    if (!draftEditLocks.available) throw new Error('This browser cannot keep drafts safe across windows, so messages open here.')
+    if (isNativeShell(window as { isTauri?: unknown })) {
+      const invoke = nativeTauri?.core?.invoke
+      if (!invoke) throw new Error('Message windows are unavailable.')
+      await invoke('open_message_window', { ...target, title: summary.subject })
+    } else if (!window.open(`${location.pathname}?${messageWindowQuery(target)}`, `dispatch-message-${summary.id}`, 'popup,width=960,height=780')) {
+      throw new Error('The browser blocked the message window. Allow pop-ups for Dispatch.')
+    }
+  } catch (error) {
+    elements.mailError.hidden = false
+    elements.mailError.textContent = error instanceof Error ? error.message : String(error)
+  }
+}
+
+let poppingOutDraft = false
+async function popOutDraft(): Promise<void> {
+  if (inMessageWindow || !activeDraft || draftSendFlight || draftDiscarding || poppingOutDraft) return
+  poppingOutDraft = true
+  const session = draftEditSession
+  let key: string | undefined
+  try {
+    if (!draftEditLocks.available) throw new Error('This browser cannot keep drafts safe across windows.')
+    // An existing save must settle before transferring its identity to the other window.
+    if (draftSaveFlight) await draftSaveFlight
+    if (!activeDraft || session !== draftEditSession) return
+    await recovery.cacheFiles(activeDraft.attachments)
+    if (!activeDraft || session !== draftEditSession) return
+    // Even an untouched Compose needs a checkpoint to open without a Gmail request.
+    draftSeed = undefined
+    draftEditRevision += 1
+    if (!checkpointDraft() || !recoveryKey) return
+    key = recoveryKey
+    const target: MessageWindowTarget = { conversationId: `draft:${key}`, threadId: activeDraft.gmailThreadId || key, mailbox: 'drafts', draftKey: key, ...(activeDraft.accountId ? { accountId: activeDraft.accountId } : {}) }
+    const title = elements.draftSubject.value || 'New message'
+    draftWindowTransfers.add(key)
+    hideDraftEditor()
+    await draftEditLocks.release()
+    if (isNativeShell(window as { isTauri?: unknown })) {
+      const invoke = nativeTauri?.core?.invoke
+      if (!invoke) throw new Error('Message windows are unavailable.')
+      await invoke('open_message_window', { ...target, title })
+    } else if (!window.open(`${location.pathname}?${messageWindowQuery(target)}`, `dispatch-message-${target.conversationId}`, 'popup,width=960,height=780')) {
+      throw new Error('The browser blocked the draft window. Allow pop-ups for Dispatch.')
+    }
+    window.setTimeout(() => {
+      if (!key || !draftWindowTransfers.delete(key)) return
+      // Failed window startup leaves the checkpoint in Drafts, with a visible retry path.
+      elements.mailError.hidden = false
+      elements.mailError.textContent = 'The draft window could not open. Your draft is saved in Drafts.'
+      scheduleDraftSync(0)
+    }, 15_000)
+  } catch (error) {
+    if (key) { draftWindowTransfers.delete(key); await restoreLocalDraft(key) }
+    draftError(error)
+  } finally { poppingOutDraft = false }
 }
 
 async function openThreadContextMenu(event: MouseEvent, conversationId: string): Promise<void> {
@@ -1369,10 +1652,11 @@ async function openThreadContextMenu(event: MouseEvent, conversationId: string):
   const summary = conversations.find((conversation) => conversation.id === conversationId)
   if (!summary) return
   const unread = acceptedReadState.get(conversationId) ?? summary.unread
-  const items = threadContextMenuItems({ mailbox, unread, hasAccountId: Boolean(summary.accountId) })
+  const items = threadContextMenuItems({ mailbox, unread, hasAccountId: Boolean(summary.accountId), openWindow: !inMessageWindow && canOpenMessageWindow(mailbox) })
   try {
     const chosen = await popupContextMenu(items, { clientX: event.clientX, clientY: event.clientY })
     if (!chosen) return
+    if (chosen === 'openWindow') { await openInMessageWindow(conversationId); return }
     if (chosen === 'markRead' || chosen === 'markUnread') {
       await applyReadState(chosen === 'markUnread', summary)
       return
@@ -1424,7 +1708,7 @@ async function runThreadContextCommand(id: string): Promise<void> {
 
 function prefetchConversations(exceptId: string): void {
   for (const summary of (searchView?.results.map(result => result.conversation) ?? conversations).filter((item) => item.id !== exceptId).slice(0, 3)) {
-    const key = `${offlineMode ? 'offline:' : ''}${mailbox}:${summary.accountId ?? selectedAccountId ?? ''}:${summary.threadId}`
+    const key = conversationCacheKey(summary)
     if (!conversationCache.has(key)) {
       const request = api.readConversation(summary.threadId, summary.accountId ?? selectedAccountId, offlineMode, mailbox)
       conversationCache.set(key, request)
@@ -1564,7 +1848,7 @@ function clearDraftAttachmentObjectUrls(): void {
 }
 
 function draftAttachmentFileUrl(draft: DraftProjection, attachment: DraftProjection['attachments'][number]): string | undefined {
-  if (attachment.contentBase64) {
+  if (attachment.contentBase64 !== undefined) {
     const bytes = Uint8Array.from(atob(attachment.contentBase64), (char) => char.charCodeAt(0))
     const url = URL.createObjectURL(new Blob([bytes], { type: attachment.mediaType }))
     draftAttachmentObjectUrls.add(url)
@@ -1578,7 +1862,7 @@ function draftAttachmentFileUrl(draft: DraftProjection, attachment: DraftProject
 
 async function openDraftAttachment(draft: DraftProjection, attachment: DraftProjection['attachments'][number]): Promise<void> {
   try {
-    if (attachment.contentBase64) await api.openLocalDraftAttachment(attachment.name, attachment.contentBase64)
+    if (attachment.contentBase64 !== undefined) await api.openLocalDraftAttachment(attachment.name, attachment.contentBase64, draft.accountId)
     else {
       const messageId = attachment.sourceMessageId ?? draft.gmailMessageId
       if (!messageId || !attachment.id) throw new Error('This attachment has no file identity. Reopen the draft and try again.')
@@ -1601,7 +1885,7 @@ function renderDraftAttachments(): void {
     open.textContent = attachment.name
     open.setAttribute('aria-label', `Open ${attachment.name}`)
     const draft = activeDraft!
-    open.disabled = !attachment.contentBase64 && !(attachment.id && (attachment.sourceMessageId || draft.gmailMessageId))
+    open.disabled = attachment.contentBase64 === undefined && !(attachment.id && (attachment.sourceMessageId || draft.gmailMessageId))
     open.addEventListener('click', () => { void openDraftAttachment(draft, attachment) })
     actions.append(open)
     if (attachment.mediaType.startsWith('image/') || attachment.mediaType === 'application/pdf') {
@@ -1639,7 +1923,9 @@ function renderDraftAttachments(): void {
     remove.setAttribute('aria-label', `Remove attachment ${attachment.name}`)
     remove.addEventListener('click', () => {
       if (!activeDraft) return
+      updateDraftAttachmentBaselineFromEditor()
       activeDraft = { ...activeDraft, attachments: activeDraft.attachments.filter((_, itemIndex) => itemIndex !== index) }
+      draftAttachmentsChanged = true
       renderDraftAttachments()
       markDraftDirty()
       if (activeDraft.id) void saveDraft(false).catch(draftError)
@@ -1674,16 +1960,21 @@ function checkpointDraft(): boolean {
     // Reserve the identity for edits made while the initial Gmail create is
     // pending, without listing an untouched reply as an unsaved draft.
     recoveryKey ??= crypto.randomUUID()
+    syncDraftEditLock()
     try { recovery.remove(recoveryKey); renderRecoveryList() } catch (error) { draftError(error); return false }
     return true
   }
   try {
     recoveryKey ??= crypto.randomUUID()
+    syncDraftEditLock()
     const accountId = activeDraft.id ? activeDraft.accountId : elements.draftAccount.value || activeDraft.accountId
     recovery.save({ key: recoveryKey, updatedAt: new Date().toISOString(), revision: draftEditRevision,
       gmailThreadId: activeDraft.gmailThreadId ?? selected?.threadId,
       accountId, accountLabel: accounts.find(account => account.id === accountId)?.email, gmailDraftId: activeDraft.id,
       inReplyToMessageId: activeDraft.inReplyToMessageId, to: recipientValue(elements.draftTo), cc: recipientValue(elements.draftCc), bcc: recipientValue(elements.draftBcc), subject: elements.draftSubject.value, bodyMarkdown: elements.draftBody.value,
+      ...(draftBase ? { base: baselineSnapshot(draftBase) } : {}), ...(activeDraft.conflict ? { conflict: activeDraft.conflict } : {}),
+      ...(activeDraft.draftRevision ? { draftRevision: activeDraft.draftRevision } : {}),
+      attachmentsChanged: draftAttachmentsChanged,
     }, activeDraft.attachments)
     elements.recoveryStatus.textContent = 'Saved · waiting to sync'
     scheduleDraftSync()
@@ -1698,16 +1989,158 @@ function checkpointDraft(): boolean {
     return true
   } catch (error) { draftError(new Error('This device could not save your draft. Keep it open and free some disk space before leaving.')); return false }
 }
+
+function baselineSnapshot(draft: DraftProjection): DraftProjection {
+  return {
+    id: draft.id,
+    ...(draft.accountId ? { accountId: draft.accountId } : {}),
+    inReplyToMessageId: draft.inReplyToMessageId,
+    to: draft.to.map(address => ({ ...address })),
+    cc: draft.cc ?? '',
+    bcc: draft.bcc ?? '',
+    subject: draft.subject,
+    bodyMarkdown: draft.bodyMarkdown,
+    bodyText: draft.bodyMarkdown,
+    bodyHtml: '',
+    attachments: draft.attachments.map(attachment => {
+      const metadata = { ...attachment }
+      delete (metadata as { contentBase64?: string }).contentBase64
+      return metadata
+    }),
+    state: 'draft',
+    ...(draft.gmailThreadId ? { gmailThreadId: draft.gmailThreadId } : {}),
+    ...(draft.gmailMessageId ? { gmailMessageId: draft.gmailMessageId } : {}),
+  }
+}
+
+/** Record the attachment list the editor just showed to the user without advancing other fields. */
+function updateDraftAttachmentBaselineFromEditor(): void {
+  if (!activeDraft?.id || !draftBase || draftBase.id !== activeDraft.id
+    || (draftBase.accountId && draftBase.accountId !== activeDraft.accountId)) return
+  const attachments = baselineSnapshot({ ...draftBase, attachments: activeDraft.attachments }).attachments
+  draftBase = { ...draftBase, attachments }
+}
+
+function baselineFromSubmittedEditor(draft: DraftProjection, fields: Record<string, unknown>, attachments: DraftProjection['attachments']): DraftProjection {
+  const to = typeof fields.to === 'string' ? parseRecipientList(fields.to) : draft.to.map(address => address.address)
+  return baselineSnapshot({
+    ...draft,
+    inReplyToMessageId: typeof fields.messageId === 'string' ? fields.messageId : draft.inReplyToMessageId,
+    to: to.map(address => ({ name: address, address, initials: '@' })),
+    cc: typeof fields.cc === 'string' ? fields.cc : '',
+    bcc: typeof fields.bcc === 'string' ? fields.bcc : '',
+    subject: typeof fields.subject === 'string' ? fields.subject : draft.subject,
+    bodyMarkdown: typeof fields.bodyMarkdown === 'string' ? fields.bodyMarkdown : draft.bodyMarkdown,
+    attachments,
+  })
+}
+
+function sameEditorAttachments(left: DraftProjection['attachments'], right: DraftProjection['attachments']): boolean {
+  const identity = (items: DraftProjection['attachments']) => items.map(item => [
+    item.id ?? '', item.sourceMessageId ?? '', item.name, item.mediaType, item.contentBase64 ?? null, item.sizeLabel ?? '',
+  ])
+  return JSON.stringify(identity(left)) === JSON.stringify(identity(right))
+}
+
+function renderDraftConflict(): void {
+  const conflict = activeDraft?.conflict
+  elements.draftConflict.hidden = !conflict
+  if (!conflict) return
+  const label: Record<string, string> = { to: 'recipients', cc: 'Cc', bcc: 'Bcc', subject: 'subject', bodyMarkdown: 'message', attachments: 'attachments' }
+  elements.draftConflictSummary.textContent = `Changed in Gmail: ${conflict.fields.map(field => label[field] ?? field).join(', ')}.`
+  const remote = conflict.remote
+  const recipients = (items: DraftProjection['to']) => items.map(item => item.address).join(', ') || 'None'
+  const lines = [
+    `To: ${recipients(remote.to)}`,
+    `Cc: ${remote.cc || 'None'}`,
+    `Bcc: ${remote.bcc || 'None'}`,
+    `Subject: ${remote.subject || '(no subject)'}`,
+    '',
+    remote.bodyMarkdown || '(empty message)',
+  ]
+  if (remote.attachments.length) lines.push('', `Attachments: ${remote.attachments.map(item => item.name).join(', ')}`)
+  elements.draftConflictRemote.textContent = lines.join('\n')
+  elements.useGmailVersion.disabled = resolvingDraftConflict
+  elements.keepLocalEdits.disabled = resolvingDraftConflict
+}
+
+async function resolveDraftConflict(choice: 'keep-local' | 'use-remote'): Promise<void> {
+  const draft = activeDraft
+  const conflict = draft?.conflict
+  if (!draft || !conflict || !draft.accountId || !draft.id || resolvingDraftConflict) return
+  const expectedRevision = draft.draftRevision
+  if (!Number.isSafeInteger(expectedRevision) || !expectedRevision || expectedRevision < 1) {
+    draftError(new Error('This Gmail draft changed. Refresh the draft before choosing a version.'))
+    return
+  }
+  if (!checkpointDraft()) return
+  const key = recoveryKey
+  if (!key) return
+  const session = draftEditSession
+  const revision = draftEditRevision
+  const remoteBase = baselineSnapshot(conflict.remote)
+  resolvingDraftConflict = true
+  renderDraftConflict()
+  try {
+    const resolved = await api.resolveDraftConflict(draft.id, draft.accountId, choice, expectedRevision)
+    if (session !== draftEditSession || activeDraft?.id !== draft.id || activeDraft.accountId !== draft.accountId) return
+    draftBase = remoteBase
+    const changedDuringResolution = draftEditRevision !== revision
+    if (choice === 'use-remote' && !changedDuringResolution) {
+      const resolvedIdentity = { ...resolved, conflict: undefined }
+      showDraft(resolvedIdentity, false)
+      draftBase = remoteBase
+      try { recovery.removeSavedRevision(key, revision); renderRecoveryList() }
+      catch (error) { draftError(new Error(`Gmail version selected, but local recovery could not be cleared: ${String(error)}`)) }
+      elements.recoveryStatus.textContent = 'Gmail version selected'
+    } else {
+      activeDraft = {
+        ...resolved,
+        ...(changedDuringResolution && activeDraft ? { attachments: activeDraft.attachments } : {}),
+        conflict: undefined,
+      }
+      if (changedDuringResolution) {
+        draftDirty = true
+        checkpointDraft()
+      } else {
+        draftDirty = false
+        try { recovery.removeSavedRevision(key, revision); renderRecoveryList() }
+        catch (error) { draftError(new Error(`Draft choice saved, but local recovery could not be cleared: ${String(error)}`)) }
+      }
+      renderDraftConflict()
+      syncDraftEditLock()
+      elements.recoveryStatus.textContent = choice === 'keep-local' && resolved.syncState ? 'Saved · waiting to sync' : 'Gmail version selected'
+      if (changedDuringResolution) autosaveDraft()
+    }
+    elements.draftError.hidden = true
+    elements.draftError.textContent = ''
+    if (resolved.syncState) scheduleDraftSync(0)
+  } catch (error) {
+    if (session === draftEditSession && activeDraft?.id === draft.id) {
+      draftError(error)
+      if (/409|draft_revision_changed|changed before conflict resolution/i.test(String(error))) void refreshQueuedDraft()
+    }
+  } finally {
+    resolvingDraftConflict = false
+    renderDraftConflict()
+  }
+}
 function clearRecovery(key = recoveryKey): void {
   if (!key) return
   try { recovery.remove(key) } catch (error) { draftError(new Error(`Gmail action completed, but the local recovery copy could not be cleared: ${String(error)}`)); return }
   if (key === recoveryKey) recoveryKey = undefined
+  syncDraftEditLock()
   renderRecoveryList()
 }
 function renderRecoveryList(): void {
   if (mailbox === 'drafts') renderList()
 }
 async function restoreLocalDraft(key: string): Promise<void> {
+  if (await draftEditLocks.heldElsewhere({ localKey: key })) {
+    elements.mailError.hidden = false
+    elements.mailError.textContent = 'This draft is open in another window.'
+    return
+  }
   if (activeDraft && draftDirty) checkpointDraft()
   const sequence = ++selectionSequence
   let codexKey: CodexPaneKey = { kind: 'draft', draftKey: key }
@@ -1723,23 +2156,32 @@ async function restoreLocalDraft(key: string): Promise<void> {
   selectedSummary = undefined
   codexContextReady = false
   elements.subject.textContent = record.subject || 'New message'
-  elements.messageCount.textContent = 'Local draft'
+  elements.threadMailbox.textContent = mailboxLabels.drafts
+  elements.messageCount.hidden = true
+  elements.countSep.hidden = true
   elements.copyStatus.hidden = true
   elements.address.hidden = true
+  elements.accountDot.hidden = true
+  elements.accountSep.hidden = true
   showDraft({ id: record.gmailDraftId, accountId: record.accountId, inReplyToMessageId: record.inReplyToMessageId,
     gmailThreadId: record.gmailThreadId,
-    to: parseRecipientList(record.to).map(address => ({ name: address, address, initials: '@' })), cc: record.cc, bcc: record.bcc, subject: record.subject, bodyMarkdown: record.bodyMarkdown, bodyText: record.bodyMarkdown, bodyHtml: '', attachments: restored.attachments, state: 'draft' }, !record.gmailDraftId)
+    to: parseRecipientList(record.to).map(address => ({ name: address, address, initials: '@' })), cc: record.cc, bcc: record.bcc, subject: record.subject, bodyMarkdown: record.bodyMarkdown, bodyText: record.bodyMarkdown, bodyHtml: '', attachments: restored.attachments, state: 'draft',
+    ...(record.conflict ? { conflict: record.conflict } : {}), ...(record.draftRevision ? { draftRevision: record.draftRevision } : {}) }, !record.gmailDraftId)
+  draftBase = record.base
   draftSeed = undefined
+  draftAttachmentsChanged = record.attachmentsChanged ?? true
   recoveryKey = key; draftDirty = true; draftEditRevision = Math.max(draftEditRevision, record.revision) + 1
+  syncDraftEditLock()
   elements.recoveryStatus.textContent = 'Saved · waiting to sync'
   if (restored.missing.length) draftError(new Error(`Reattach these files before saving: ${restored.missing.join(', ')}`))
   refreshPreview()
   if (!offlineMode) void bindAndShowCodex(codexKey, { sequence })
 }
 function freezeDraft(disabled: boolean): void {
+  elements.draftBody.disabled = disabled
   elements.draft.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>('input,textarea,select,button').forEach(control => { control.disabled = disabled })
   if (!disabled) elements.draftAccount.disabled = Boolean(activeDraft?.id)
-  if (!disabled) elements.sendDraft.disabled = Boolean(activeDraft?.cachedAt)
+  if (!disabled) elements.sendDraft.disabled = Boolean(activeDraft?.cachedAt || activeDraft?.syncState)
 }
 
 function draftError(error: unknown): void {
@@ -1758,6 +2200,24 @@ function draftError(error: unknown): void {
   elements.draftError.textContent = describeRequestError(detail)
 }
 
+/**
+ * Discard waits for a save in flight. Only a failure that says where the draft stands lets it go
+ * on: Gmail's rate limit (nothing reached Gmail) or a draft Gmail no longer has. Any other failure
+ * may have saved the draft in Gmail, so Discard stops and says so rather than drop the local copy.
+ */
+function settledSave(save: Promise<DraftProjection | undefined>): Promise<DraftProjection | undefined> {
+  return save.catch((error: unknown) => {
+    if (['gmail_backoff', 'gmail_draft_not_found'].includes(requestErrorCode(String(error)) ?? '')) return undefined
+    throw error
+  })
+}
+
+/** A failed Discard is not a pending save: say why the draft is still here. */
+function discardError(error: unknown): void {
+  elements.draftError.hidden = false
+  elements.draftError.textContent = describeRequestError(error instanceof Error ? error.message : String(error))
+}
+
 function replyQuoteMarkdown(message: MessageProjection): string {
   const content = emailPlainText(message.body.kind, message.body.content)
   return `\n\n> ${content.split(/\r?\n/).join('\n> ')}`
@@ -1769,15 +2229,42 @@ function setDraftCollapsed(collapsed: boolean): void {
   const button = app.querySelector<HTMLButtonElement>('[data-collapse-draft]')!
   button.setAttribute('aria-expanded', String(!collapsed))
   button.innerHTML = `<i class="ti ti-chevron-${collapsed ? 'up' : 'down'} me-1" aria-hidden="true"></i>${collapsed ? 'Expand' : 'Collapse'} draft`
+  app.querySelector<HTMLButtonElement>('[data-toggle-preview]')!.hidden = collapsed
 }
+for (const { row, toggle, input } of copyRows) toggle.addEventListener('click', () => { row.hidden = false; toggle.hidden = true; input.focus() })
+app.querySelector<HTMLButtonElement>('[data-toggle-preview]')!.addEventListener('click', event => {
+  const button = event.currentTarget as HTMLButtonElement
+  elements.draftPreview.hidden = !elements.draftPreview.hidden
+  button.setAttribute('aria-pressed', String(!elements.draftPreview.hidden))
+})
+elements.refreshThreadCompleteness.addEventListener('click', () => {
+  const id = selectedConversationId
+  if (!id || selected?.completeness?.complete !== false || threadRefreshInFlight) return
+  threadRefreshFailed = false
+  threadRefreshInFlight = true
+  renderThreadCompleteness(selected)
+  dropConversationCache(id)
+  void selectConversation(id, { refresh: true }).finally(() => {
+    if (selectedConversationId !== id) return
+    threadRefreshInFlight = false
+    renderThreadCompleteness(selected)
+  })
+})
 app.querySelector<HTMLButtonElement>('[data-collapse-draft]')!.addEventListener('click', () => {
   setDraftCollapsed(!app.querySelector<HTMLElement>('[data-draft-content]')!.hidden)
 })
 
 function showDraft(draft: DraftProjection, accountMutable: boolean): void {
-  const sameDraft = Boolean(activeDraft && activeDraft.id === draft.id && activeDraft.accountId === draft.accountId && activeDraft.inReplyToMessageId === draft.inReplyToMessageId)
+  if (!draft.syncState && draft.resolvedFromDraftId) void linkDraftTask(draft.resolvedFromDraftId, draft).catch(error => console.error('Draft task binding needs reconnection:', error))
+  const resolvedSameDraft = Boolean(activeDraft && draft.resolvedFromDraftId === activeDraft.id && activeDraft.accountId === draft.accountId)
+  const sameDraft = Boolean(activeDraft && draft.id && activeDraft.id && (activeDraft.id === draft.id || resolvedSameDraft) && activeDraft.accountId === draft.accountId && activeDraft.inReplyToMessageId === draft.inReplyToMessageId)
   if (!sameDraft) setDraftCollapsed(false)
-  if (!draft.id || activeDraft?.id !== draft.id || activeDraft?.accountId !== draft.accountId) recoveryKey = undefined
+  if (!sameDraft) {
+    activeForwardOrigin = undefined
+    activeDraftReplyMode = undefined
+  }
+  if (!sameDraft && (activeDraft?.id !== draft.id || activeDraft?.accountId !== draft.accountId)) recoveryKey = undefined
+  if (!sameDraft) draftBase = undefined
   if (draftPreviewTimer !== undefined) window.clearTimeout(draftPreviewTimer)
   if (draftAutosaveTimer !== undefined) window.clearTimeout(draftAutosaveTimer)
   draftPreviewTimer = undefined
@@ -1786,6 +2273,9 @@ function showDraft(draft: DraftProjection, accountMutable: boolean): void {
   draftEditSession += 1
   draftDirty = false
   activeDraft = draft
+  if (!draft.conflict && draft.id && !draftBase) draftBase = baselineSnapshot(draft)
+  if (!draft.conflict && !draft.syncState && draft.id) draftBase = baselineSnapshot(draft)
+  draftAttachmentsChanged = false
   elements.reader.hidden = false
   elements.readerEmpty.hidden = true
   elements.reader.classList.add('dispatch-drafting')
@@ -1809,18 +2299,26 @@ function showDraft(draft: DraftProjection, accountMutable: boolean): void {
   setRecipientField(elements.draftTo, draft.to.map((address) => address.address).join(', '))
   setRecipientField(elements.draftCc, draft.cc ?? '')
   setRecipientField(elements.draftBcc, draft.bcc ?? '')
+  for (const { row, toggle, input } of copyRows) {
+    row.hidden = !(sameDraft && !row.hidden) && !recipientValue(input).trim()
+    toggle.hidden = !row.hidden
+  }
   elements.draftSubject.value = draft.subject
   elements.draftBody.value = draft.bodyMarkdown || draft.bodyText
-  elements.draftPreview.innerHTML = draft.bodyHtml
+  elements.draftPreview.innerHTML = sanitizeDraftPreview(draft.bodyHtml)
   elements.draftError.hidden = true
   elements.draftError.textContent = ''
+  resolvingDraftConflict = false
+  renderDraftConflict()
   elements.sendConfirm.hidden = true
   renderDraftAttachments()
   draftSeed = { fields: editorFields(), attachments: draft.attachments }
   draftDiscarding = false
-  elements.recoveryStatus.textContent = draft.cachedAt ? 'Checking Gmail…' : ''
+  elements.recoveryStatus.textContent = draft.syncState ? (draft.syncError ?? 'Saved · waiting to sync') : draft.cachedAt ? 'Checking Gmail…' : ''
+  if (draft.reconnectRequired) elements.mailReconnect.hidden = false
   elements.recoveryStatus.title = draft.cachedAt ? `Last confirmed ${new Date(draft.cachedAt).toLocaleString()}` : ''
   freezeDraft(Boolean(draftSendFlight))
+  syncDraftEditLock()
   void recovery.cacheFiles(draft.attachments).then(() => { if (activeDraft?.id === draft.id && draftDirty) checkpointDraft() }).catch(draftError)
 }
 
@@ -1836,6 +2334,10 @@ function hideDraftEditor(): void {
   draftDiscarding = false
   activeDraft = undefined
   recoveryKey = undefined
+  draftBase = undefined
+  resolvingDraftConflict = false
+  renderDraftConflict()
+  syncDraftEditLock()
   elements.draft.hidden = true
   elements.sendConfirm.hidden = true
   elements.draftError.hidden = true
@@ -1857,7 +2359,7 @@ function refreshPreview(): void {
   draftPreviewTimer = window.setTimeout(() => {
     draftPreviewTimer = undefined
     void api.previewDraft(elements.draftBody.value).then((bodyHtml) => {
-      if (sequence === draftPreviewSequence && activeDraft) elements.draftPreview.innerHTML = bodyHtml
+      if (sequence === draftPreviewSequence && activeDraft) elements.draftPreview.innerHTML = sanitizeDraftPreview(bodyHtml)
     }).catch(draftError)
   }, 300)
 }
@@ -1867,6 +2369,7 @@ function autosaveDraft(): void {
   draftAutosaveTimer = window.setTimeout(() => {
     draftAutosaveTimer = undefined
     if (draftDirty && activeDraft && !offlineMode && !draftSendFlight) {
+      if (activeDraft.conflict) return
       const addresses = [elements.draftTo, elements.draftCc, elements.draftBcc].flatMap(field => parseRecipientList(recipientValue(field)))
       if (addresses.some(address => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))) return
       if (!activeDraft.id && draftSeed?.fields === editorFields() && draftSeed.attachments === activeDraft.attachments) return
@@ -1905,8 +2408,28 @@ async function openDraft(replyAll = false): Promise<void> {
   const subject = /^re:/i.test(selected.subject) ? selected.subject : `Re: ${selected.subject}`
   const fields = { to, cc, bcc: '', subject, bodyMarkdown, bodyText: bodyMarkdown }
   if (offlineMode || (selected.source === 'gmail' && accountId)) {
-    if (draftSaveFlight && activeDraft?.inReplyToMessageId === latest.id && activeDraft.accountId === accountId) { elements.draftBody.focus(); return }
+    if (!draftDiscarding && activeDraft?.inReplyToMessageId === latest.id && activeDraft.accountId === accountId) {
+      setDraftCollapsed(false)
+      const replyModeMatches = Boolean(activeDraftReplyMode && activeDraftReplyMode.accountId === accountId && activeDraftReplyMode.messageId === latest.id && activeDraftReplyMode.replyAll === replyAll)
+      if (!replyModeMatches) {
+        const replyTo = parseRecipientList(to).map(address => ({ name: address, address, initials: '@' }))
+        const bcc = recipientValue(elements.draftBcc)
+        activeDraft = { ...activeDraft, to: replyTo, cc, bcc }
+        setRecipientField(elements.draftTo, to)
+        setRecipientField(elements.draftCc, cc)
+        const ccRow = app.querySelector<HTMLElement>('[data-copy-row="cc"]')!
+        const ccToggle = app.querySelector<HTMLButtonElement>('[data-show-copy="cc"]')!
+        ccRow.hidden = !cc.trim()
+        ccToggle.hidden = !ccRow.hidden
+        activeDraftReplyMode = { accountId, messageId: latest.id, replyAll }
+        markDraftDirty()
+        if (activeDraft.id) autosaveDraft()
+      }
+      elements.draftBody.focus()
+      return
+    }
     showDraft({ id: '', accountId, inReplyToMessageId: latest.id, to: parseRecipientList(to).map(address => ({ name: address, address, initials: '@' })), cc, bcc: '', subject, bodyMarkdown, bodyText: bodyMarkdown, bodyHtml: '', attachments: [], state: 'draft' }, true)
+    activeDraftReplyMode = { accountId, messageId: latest.id, replyAll }
     markDraftDirty(); refreshPreview(); elements.draftBody.focus()
     if (!offlineMode) void saveDraft(false).catch(draftError)
     return
@@ -1915,6 +2438,7 @@ async function openDraft(replyAll = false): Promise<void> {
     ? await api.createDraft(latest.id, { accountId, ...fields })
     : await api.createDraft(selected.latestMessageId, fields)
   showDraft(draft, false)
+  activeDraftReplyMode = { accountId, messageId: latest.id, replyAll }
 }
 
 async function openForward(): Promise<void> {
@@ -1923,11 +2447,17 @@ async function openForward(): Promise<void> {
   const latest = selected.messages.find((message) => message.id === latestMessageId) ?? selected.messages[0]
   if (!latest) return
   const subject = selected.subject.startsWith('Fwd:') ? selected.subject : `Fwd: ${selected.subject}`
-  if (draftSaveFlight && activeDraft?.subject === subject && activeDraft.accountId === selected.accountId) { elements.draftBody.focus(); return }
+  if (!draftDiscarding && activeDraft && activeForwardOrigin?.accountId === selected.accountId
+    && activeForwardOrigin.messageId === latestMessageId && activeDraft.accountId === selected.accountId) {
+    setDraftCollapsed(false)
+    elements.draftBody.focus()
+    return
+  }
   const content = emailPlainText(latest.body.kind, latest.body.content)
   const bodyMarkdown = `\n\n---------- Forwarded message ----------\nFrom: ${latest.sender.name} <${latest.sender.address}>\nDate: ${latest.receivedFullLabel}\nSubject: ${latest.subject}\n\n${content}`
   if (offlineMode || selected.source === 'gmail') {
     showDraft({ id: '', accountId: selected.accountId, inReplyToMessageId: '', to: [], cc: '', bcc: '', subject, bodyMarkdown, bodyText: bodyMarkdown, bodyHtml: '', attachments: latest.attachments.map(file => ({ ...file, sourceMessageId: latest.id })), state: 'draft' }, true)
+    activeForwardOrigin = { accountId: selected.accountId, messageId: latestMessageId }
     markDraftDirty(); refreshPreview()
     if (!offlineMode) void saveDraft(false).catch(draftError)
     return
@@ -1949,6 +2479,7 @@ async function openForward(): Promise<void> {
     })),
   })
   showDraft(draft, false)
+  activeForwardOrigin = { accountId: selected.accountId, messageId: latestMessageId }
 }
 
 function openCompose(existingKey?: string): void {
@@ -1981,15 +2512,17 @@ function openCompose(existingKey?: string): void {
   const draft: DraftProjection = { id: '', inReplyToMessageId: '', to: [], cc: '', bcc: '', subject: '', bodyMarkdown: '', bodyHtml: '', bodyText: '', attachments: [], state: 'draft', accountId }
   showDraft(draft, true)
   recoveryKey = codexKey.draftKey
+  syncDraftEditLock()
 }
 
 async function saveDraft(notify = true): Promise<void> {
   if (offlineMode) { checkpointDraft(); throw new Error('This draft is saved locally. Go online to save it to Gmail.') }
+  if (activeDraft?.conflict) throw new Error('Choose which draft version to keep before saving.')
   if (draftDiscarding) return
   const session = draftEditSession
   if (recoveryKey && backgroundDraftSaves.has(recoveryKey)) {
     const synced = await backgroundDraftSaves.get(recoveryKey)!.catch(() => undefined)
-    if (synced && session === draftEditSession && activeDraft && !activeDraft.id) activeDraft = { ...activeDraft, id: synced.id, gmailThreadId: synced.gmailThreadId, gmailMessageId: synced.gmailMessageId }
+    if (synced && session === draftEditSession && activeDraft && !activeDraft.id) { activeDraft = { ...activeDraft, id: synced.id, gmailThreadId: synced.gmailThreadId, gmailMessageId: synced.gmailMessageId }; syncDraftEditLock() }
   }
   while (draftSaveFlight) await draftSaveFlight
   if (draftDiscarding || !activeDraft || session !== draftEditSession) return
@@ -1999,15 +2532,24 @@ async function saveDraft(notify = true): Promise<void> {
   const accountId = draft.id ? draft.accountId : elements.draftAccount.value
   if (!accountId) throw new Error('Choose a Gmail account for this draft.')
   const bodyMarkdown = elements.draftBody.value
-  const fields = { accountId, clientDraftId: savingRecoveryKey, messageId: draft.inReplyToMessageId, to: recipientValue(elements.draftTo), cc: recipientValue(elements.draftCc), bcc: recipientValue(elements.draftBcc), subject: elements.draftSubject.value, bodyMarkdown, bodyText: bodyMarkdown, attachments: draft.attachments }
+  const base = draft.id && draftBase?.id === draft.id ? baselineSnapshot(draftBase) : undefined
+  const submittedAttachments = draft.attachments
+  const includeAttachments = !draft.id || draftAttachmentsChanged
+  const fields = {
+    accountId, clientDraftId: savingRecoveryKey, draftId: draft.id || undefined, messageId: draft.inReplyToMessageId,
+    to: recipientValue(elements.draftTo), cc: recipientValue(elements.draftCc), bcc: recipientValue(elements.draftBcc),
+    subject: elements.draftSubject.value, bodyMarkdown, bodyText: bodyMarkdown,
+    ...(includeAttachments ? { attachments: submittedAttachments } : {}), ...(base ? { base } : {}),
+  }
   elements.draftAccount.disabled = true
   elements.recoveryStatus.textContent = 'Saving…'
   let savedSuccessfully = false
   let retrySave = false
   const operation = (async () => {
-    const savedDraft = draft.id
-      ? await api.updateDraft(draft.id, fields)
-      : await api.createDraft('', fields)
+    const legacyFields = { accountId, clientDraftId: savingRecoveryKey, messageId: draft.inReplyToMessageId, to: fields.to, cc: fields.cc, bcc: fields.bcc, subject: fields.subject, bodyMarkdown, bodyText: bodyMarkdown, attachments: draft.attachments }
+    const savedDraft = accountId === 'demo'
+      ? draft.id ? await api.updateDraft(draft.id, legacyFields) : await api.createDraft('', legacyFields)
+      : await api.saveDraft(fields)
     savedSuccessfully = true
     if (savingRecoveryKey) void linkDraftTask(savingRecoveryKey, savedDraft).catch(error => console.error('Draft task binding will need reconnection:', error))
     if (savingRecoveryKey) draftSyncErrors.delete(savingRecoveryKey)
@@ -2022,9 +2564,17 @@ async function saveDraft(notify = true): Promise<void> {
     }
     if (session !== draftEditSession || !activeDraft || activeDraft.id !== draft.id || draftDiscarding) return savedDraft
     activeDraft = draftEditRevision === savingRevision ? savedDraft : { ...savedDraft, attachments: activeDraft.attachments }
-    elements.sendDraft.disabled = false
+    if (savedDraft.id && draftBase && draftBase.id !== savedDraft.id
+      && (draftBase.id === draft.id || savedDraft.resolvedFromDraftId === draftBase.id)) draftBase = { ...draftBase, id: savedDraft.id }
+    if (savedDraft.id && !draftBase) draftBase = baselineFromSubmittedEditor(savedDraft, fields, submittedAttachments)
+    if (draftEditRevision === savingRevision && !savedDraft.syncState) draftBase = baselineSnapshot(savedDraft)
+    if (draftEditRevision === savingRevision || sameEditorAttachments(activeDraft.attachments, submittedAttachments)) draftAttachmentsChanged = false
+    if (draftEditRevision === savingRevision) renderDraftAttachments()
+    renderDraftConflict()
+    syncDraftEditLock()
+    elements.sendDraft.disabled = Boolean(savedDraft.syncState)
     elements.draftAccount.disabled = true
-    elements.draftPreview.innerHTML = savedDraft.bodyHtml
+    elements.draftPreview.innerHTML = sanitizeDraftPreview(savedDraft.bodyHtml)
     elements.draftError.hidden = true
     elements.draftError.textContent = ''
     if (draftEditRevision === savingRevision && recipientValue(elements.draftTo) === fields.to
@@ -2034,9 +2584,9 @@ async function saveDraft(notify = true): Promise<void> {
       && elements.draftBody.value === bodyMarkdown) {
       draftDirty = false
       clearRecovery(savingRecoveryKey)
-      elements.recoveryStatus.textContent = 'Saved to Gmail'
+      elements.recoveryStatus.textContent = savedDraft.syncState ? (savedDraft.syncError ?? 'Saved · waiting to sync') : 'Saved to Gmail'
     } else { checkpointDraft() }
-    if (notify) addAgentMessage('tool', 'Gmail draft saved.')
+    if (notify) addAgentMessage('tool', savedDraft.syncState ? 'Draft saved on this device; waiting for Gmail.' : 'Gmail draft saved.')
     return savedDraft
   })()
   draftSaveFlight = operation
@@ -2147,8 +2697,8 @@ async function discardDraft(): Promise<void> {
   draftEditSession += 1
   let savedDraft: DraftProjection | undefined = draft
   try {
-    if (recoveryKey && backgroundDraftSaves.has(recoveryKey)) savedDraft = (await backgroundDraftSaves.get(recoveryKey)) ?? draft
-    if (draftSaveFlight) savedDraft = (await draftSaveFlight) ?? draft
+    if (recoveryKey && backgroundDraftSaves.has(recoveryKey)) savedDraft = (await settledSave(backgroundDraftSaves.get(recoveryKey)!)) ?? draft
+    if (draftSaveFlight) savedDraft = (await settledSave(draftSaveFlight)) ?? draft
     const discardId = savedDraft.id
     if (discardId) {
       if (!savedDraft.accountId) throw new Error('The Gmail account is missing from this draft.')
@@ -2184,6 +2734,7 @@ async function attachDraftFiles(): Promise<void> {
     await recovery.cacheFiles(attachments)
     if (!activeDraft || attachmentSession !== draftEditSession) return
     activeDraft = { ...activeDraft, attachments: [...activeDraft.attachments, ...attachments] }
+    draftAttachmentsChanged = true
     renderDraftAttachments()
     markDraftDirty()
     if (!offlineMode) await saveDraft()
@@ -2234,6 +2785,7 @@ async function applySelection(next: SelectionState): Promise<void> {
   selectedConversationId = undefined
   activeDraft = undefined
   recoveryKey = undefined
+  syncDraftEditLock()
   draftEditSession += 1
   draftDirty = false
   renderMultiSelection()
@@ -2397,7 +2949,76 @@ async function undoLastMove(): Promise<void> {
   }
 }
 
+function actionKeepsConversation(action: GmailConversationAction, from: GmailMailbox): boolean {
+  if (action === 'archive') return from === 'sent'
+  if (action === 'spam') return from === 'spam'
+  if (action === 'trash') return from === 'trash'
+  return from === 'inbox'
+}
+
+function conversationSummary(value: ConversationSummary): ConversationSummary {
+  const { id, threadId, accountId, accountLabel, latestMessageId, sender, subject, receivedAt, receivedLabel, receivedFullLabel, preview, unread, hasAttachment, messageCount, downloaded } = value
+  return { id, threadId, accountId, accountLabel, latestMessageId, sender, subject, receivedAt, receivedLabel, receivedFullLabel, preview, unread, hasAttachment, messageCount, downloaded }
+}
+
+async function closeThisWindow(): Promise<void> {
+  const current = (window as { __TAURI__?: { window?: { getCurrentWindow(): { close(): Promise<void> } } } }).__TAURI__?.window?.getCurrentWindow()
+  if (current) await current.close()
+  else window.close()
+}
+
+/** Like Mail: a message window closes once its conversation leaves the mailbox, and the main window offers Undo. */
+async function moveFromMessageWindow(action: GmailConversationAction): Promise<void> {
+  const summary = conversations[0]
+  if (!summary?.accountId) {
+    elements.mailError.hidden = false
+    elements.mailError.textContent = 'This message is still loading. Refresh it before moving it.'
+    return
+  }
+  const controls = [elements.archive, elements.spam, elements.trash, elements.moveInbox]
+  const wasDisabled = controls.map((control) => control.disabled)
+  controls.forEach((control) => { control.disabled = true })
+  try {
+    await api.mutateConversation(summary.threadId, summary.accountId, selected?.messages.map((message) => message.id) ?? [], action)
+  } catch {
+    elements.mailError.hidden = false
+    elements.mailError.textContent = 'The change could not be saved. Try again.'
+    return
+  } finally {
+    controls.forEach((control, index) => { control.disabled = wasDisabled[index]! })
+  }
+  if (actionKeepsConversation(action, mailbox)) { await loadConversations(true); return }
+  const moved: MovedInMessageWindow = { type: 'moved', action, mailbox, summary: conversationSummary(summary) }
+  messageWindowChannel?.postMessage(moved)
+  try { await closeThisWindow() } catch (error) {
+    elements.mailError.hidden = false
+    elements.mailError.textContent = `Moved. This window could not close: ${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
+/** A message window moved a conversation out of this window's mailbox: drop its row and offer Undo here. */
+function acceptMoveFromMessageWindow(moved: MovedInMessageWindow): void {
+  const listed = listedConversations()
+  const index = listed.findIndex((item) => item.id === moved.summary.id)
+  if (mailbox === moved.mailbox && index >= 0) {
+    conversations = conversations.filter((item) => item.id !== moved.summary.id)
+    if (searchView) searchView = { ...searchView, results: searchView.results.filter((item) => item.conversation.id !== moved.summary.id) }
+    if (selectedConversationId === moved.summary.id && !activeDraft) {
+      const next = listed[index + 1] ?? listed[index - 1]
+      selected = undefined; selectedSummary = undefined; selectedConversationId = undefined; selection = EMPTY_SELECTION
+      elements.reader.hidden = true
+      elements.readerEmpty.hidden = false
+      elements.readerEmpty.textContent = defaultEmptyListMessage()
+      if (next) void selectConversation(next.id)
+    } else selection = pruneSelection(selection, listedConversations().map((item) => item.id))
+    renderList()
+  }
+  showUndoToast({ action: moved.action, mailbox: moved.mailbox, rows: [{ summary: moved.summary, index: Math.max(0, index) }] })
+  void loadConversations(true)
+}
+
 async function mutateConversations(ids: readonly string[], action: GmailConversationAction): Promise<void> {
+  if (messageWindow) { await moveFromMessageWindow(action); return }
   const listedBefore = listedConversations()
   const targets = listedBefore.filter((conversation) => ids.includes(conversation.id))
   const writable = targets.filter((conversation) => conversation.accountId && conversation.threadId)
@@ -2410,12 +3031,7 @@ async function mutateConversations(ids: readonly string[], action: GmailConversa
   const loadedMessageIds = selected?.messages.map((message) => message.id) ?? []
   const originalMailbox = mailbox
   const originalIndexes = new Map(writable.map((conversation) => [conversation.id, listedBefore.findIndex((item) => item.id === conversation.id)]))
-  const remainsInMailbox = (value: GmailConversationAction): boolean => {
-    if (value === 'archive') return mailbox === 'sent'
-    if (value === 'spam') return mailbox === 'spam'
-    if (value === 'trash') return mailbox === 'trash'
-    return mailbox === 'inbox'
-  }
+  const remainsInMailbox = (value: GmailConversationAction): boolean => actionKeepsConversation(value, mailbox)
   const removing = !remainsInMailbox(action)
   if (removing) {
     conversationLoadSequence += 1
@@ -2743,12 +3359,15 @@ function handleAgentEvent(message: AgentEvent): void {
   if (message.method === 'turn/started') {
     const turn = params?.turn as Record<string, unknown> | undefined
     activeTurnId = typeof turn?.id === 'string' ? turn.id : undefined
-    elements.stop.hidden = !activeTurnId
+    if (threadId && interruptRequests.get(threadId)?.turnId !== activeTurnId) interruptRequests.delete(threadId)
     setAgentStatus('Working')
   }
   if (message.method === 'turn/completed') {
     const turn = params?.turn as Record<string, unknown> | undefined
+    if (typeof turn?.id === 'string' && activeTurnId && turn.id !== activeTurnId) return
     const status = String(turn?.status ?? 'completed')
+    activeTurnId = undefined
+    if (threadId) interruptRequests.delete(threadId)
     if (searchView?.phase === 'pending') {
       searchView = { ...searchView, phase: 'failed', error: status === 'interrupted' ? 'Search stopped.' : 'Codex did not publish verified results. Refine the request or try again.' }
       renderList()
@@ -2765,8 +3384,6 @@ function handleAgentEvent(message: AgentEvent): void {
     }
     activeAgentMessage = undefined
     activeAgentText = ''
-    activeTurnId = undefined
-    elements.stop.hidden = true
     const draftToRefresh = activeDraft
     if (draftToRefresh?.id && draftToRefresh.accountId && codexDraftFlights === 0) {
       void refreshCodexDraft(draftToRefresh.id, draftToRefresh.accountId, false)
@@ -2815,12 +3432,12 @@ async function refreshCodexDraft(draftId: string, accountId: string, createdByCo
   try {
     const draft = await api.getDraft(draftId, accountId)
     if (request !== codexDraftRequest || snapshot.selection !== selectionSequence || snapshot.pane !== paneSequence) return
-    if (draft.id !== draftId || draft.accountId !== accountId) throw new Error('Gmail returned a different draft or account; the editor was not changed.')
+    if ((draft.id !== draftId && draft.resolvedFromDraftId !== draftId) || draft.accountId !== accountId) throw new Error('Gmail returned a different draft or account; the editor was not changed.')
     const unchanged = snapshot.session === draftEditSession && snapshot.revision === draftEditRevision
       && snapshot.draftId === activeDraft?.id && snapshot.accountId === activeDraft?.accountId
       && !snapshot.dirty && !snapshot.saving && !draftDirty && !draftSaveFlight
     if (unchanged) showDraft(draft, false)
-    else if (createdByCodex) addAgentMessage('tool', 'Gmail saved the draft. Your current edits were kept; open Drafts to review the saved version.')
+    else if (createdByCodex) addAgentMessage('tool', `${draft.syncState ? 'Dispatch saved the draft on this device.' : 'Gmail saved the draft.'} Your current edits were kept; open Drafts to review the saved version.`)
     if (createdByCodex && mailbox === 'drafts') void loadConversations(true)
   } catch (error) {
     if (snapshot.selection !== selectionSequence || snapshot.pane !== paneSequence) return
@@ -2853,6 +3470,11 @@ async function applyCodexMailEffect(effect: CodexMailEffect): Promise<void> {
     return
   }
   if (effect.kind === 'draft') {
+    if (effect.draftId.startsWith('queued-') && threadId) {
+      const key: CodexPaneKey = { kind: 'draft', draftKey: effect.draftId }
+      writeBindingCache(key, threadId)
+      void api.bindThread(key, threadId).catch(error => console.error('Draft task binding needs reconnection:', error))
+    }
     await refreshCodexDraft(effect.draftId, effect.accountId, true)
     return
   }
@@ -2889,7 +3511,7 @@ async function showCodexThread(nextThreadId: string, created: boolean, replaced:
   activeAgentMessage = undefined
   activeAgentText = ''
   activeTurnId = undefined
-  elements.stop.hidden = true
+  renderAgentComposer()
   if (replaced) console.info(detail ? `Codex thread replaced · ${detail}` : 'Codex thread replaced')
   if (!created) {
     try {
@@ -2905,7 +3527,8 @@ async function showCodexThread(nextThreadId: string, created: boolean, replaced:
       const state = history.dispatchActivity ?? { threadId: nextThreadId, status: running ? 'Working' : 'Connected', turnId: running?.id, requests: [] }
       taskStatuses.set(nextThreadId, state)
       activeTurnId = state.turnId
-      elements.stop.hidden = !activeTurnId
+      if (interruptRequests.get(nextThreadId)?.turnId !== activeTurnId) interruptRequests.delete(nextThreadId)
+      renderAgentComposer()
       const lastItem = restored.at(-1)
       if (activeTurnId && lastItem?.type === 'agentMessage') {
         activeAgentMessage = [...elements.stream.querySelectorAll<HTMLElement>('.dispatch-agent-agent')].at(-1)
@@ -3026,6 +3649,7 @@ async function connectAgent(): Promise<void> {
     await bindAndShowCodex(key, { sequence: selectionSequence,
       adoptThreadId: key.kind === 'unbound' ? readBindingCache().unbound : undefined })
     void refreshModelCatalog()
+    void refreshExecutionPreferences()
   } catch (error) {
     setAgentStatus('Reconnecting', error instanceof Error ? error.message : String(error))
     scheduleAgentReconnect()
@@ -3037,8 +3661,12 @@ async function connectAgent(): Promise<void> {
 async function sendPrompt(): Promise<void> {
   const text = elements.prompt.value.trim()
   if (!text || !threadId) return
+  const targetThreadId = threadId
+  const interrupt = interruptRequests.get(targetThreadId)
+  if (promptSubmissions.has(targetThreadId) || (interrupt && interrupt.turnId === activeTurnId && !interrupt.error)) return
   if (!codexContextReady) { addAgentMessage('error', 'Codex is still connecting to the selected conversation. Please try again.'); return }
   const selection = selectionSequence
+  promptSubmissions.add(targetThreadId)
   acceptChatSearchResults = true
   addAgentMessage('user', text)
   setAgentStatus('Working')
@@ -3069,8 +3697,33 @@ async function sendPrompt(): Promise<void> {
       } : undefined,
     })
   } catch (error) {
-    if (selection !== selectionSequence) return
+    if (selection !== selectionSequence || threadId !== targetThreadId) return
+    if (!elements.prompt.value) elements.prompt.value = text
+    if (!activeTurnId) setAgentStatus('Failed')
     addAgentMessage('error', error instanceof Error ? error.message : String(error))
+  } finally {
+    promptSubmissions.delete(targetThreadId)
+    renderAgentComposer()
+  }
+}
+
+async function stopCodexTurn(): Promise<void> {
+  if (!threadId || !activeTurnId) return
+  const targetThreadId = threadId
+  const targetTurnId = activeTurnId
+  const previous = interruptRequests.get(targetThreadId)
+  if (previous?.turnId === targetTurnId && !previous.error) return
+  const request = { turnId: targetTurnId } as { turnId: string; error?: string }
+  interruptRequests.set(targetThreadId, request)
+  renderAgentComposer()
+  try {
+    await api.interruptTurn(targetThreadId, targetTurnId)
+    // Acceptance does not mean the turn has stopped. Its completion event or
+    // authoritative activity snapshot restores Send, including after navigation.
+  } catch (error) {
+    if (interruptRequests.get(targetThreadId) !== request) return
+    request.error = error instanceof Error ? error.message : String(error)
+    renderAgentComposer()
   }
 }
 
@@ -3109,6 +3762,7 @@ async function searchWithCodex(): Promise<void> {
   searchQuery = query
   selected = undefined; selectedConversationId = undefined; selectedAttachmentContext = undefined
   activeDraft = undefined; draftEditSession += 1; codexContextReady = false
+  syncDraftEditLock()
   elements.reader.hidden = true; elements.readerEmpty.hidden = false
   elements.readerEmpty.textContent = 'Search results will appear in the message list.'
   elements.mailError.hidden = true
@@ -3137,7 +3791,55 @@ async function searchWithCodex(): Promise<void> {
   }
 }
 
+/** Opens the one conversation a message window shows. */
+async function openMessageWindowConversation(target: MessageWindowTarget): Promise<void> {
+  mailbox = target.mailbox
+  renderMailbox()
+  if (target.draftKey) {
+    await restoreLocalDraft(target.draftKey)
+    if (!activeDraft) throw new Error('This draft is already open in another window.')
+    document.title = elements.draftSubject.value || 'New message'
+    messageWindowChannel?.postMessage({ type: 'draft-opened', key: target.draftKey })
+    return
+  }
+  const conversation = await api.readConversation(target.threadId, target.accountId, offlineMode, target.mailbox)
+  showMessageWindowConversation(conversation)
+  await selectConversation(conversation.id, { startReadDwell: true })
+}
+
+function showMessageWindowConversation(conversation: ConversationProjection): void {
+  conversations = [conversation]
+  conversationCache.set(conversationCacheKey(conversation), Promise.resolve(conversation))
+  document.title = conversation.subject || 'Message'
+}
+
+/** Checks the local mailbox index, and rereads the conversation only when a message arrived or left. */
+async function refreshMessageWindowConversation(target: MessageWindowTarget): Promise<void> {
+  if (target.draftKey) return
+  const current = conversations[0]
+  if (!current) return
+  try {
+    const listed = await api.listConversations('all', target.accountId, undefined, '', target.mailbox, offlineMode)
+    elements.mailError.hidden = true
+    const summary = listed.conversations.find((item) => item.id === current.id)
+    if (!summary) return
+    if (summary.latestMessageId === current.latestMessageId && !readerNeedsRetry) {
+      conversations = [{ ...current, unread: summary.unread }]
+      syncSelectedReadState()
+      return
+    }
+    dropConversationCache(current.id)
+    const conversation = await api.readConversation(target.threadId, target.accountId, offlineMode, target.mailbox)
+    showMessageWindowConversation(conversation)
+    if (!activeDraft) await selectConversation(conversation.id, { refresh: true })
+  } catch (error) {
+    elements.mailError.hidden = false
+    elements.mailError.textContent = `This conversation could not refresh: ${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
 async function loadConversations(preserveSelection = false): Promise<void> {
+  if (messageWindow) { await refreshMessageWindowConversation(messageWindow); return }
   if (searchView) { renderList(); return }
   const loadSequence = ++conversationLoadSequence
   const cacheKey = `${offlineMode ? 'offline:' : ''}dispatch.conversations.v1:${selectedAccountId ?? 'all'}:${mailbox}:${mailState}:${searchQuery}`
@@ -3224,7 +3926,7 @@ async function loadConversations(preserveSelection = false): Promise<void> {
       : result.coverage === 'recent'
         ? `Recent ${mailboxLabels[mailbox]} · ${refreshedLabel}`
         : `${!selectedAccountId && accounts.length > 1 ? 'Unified Gmail' : 'Gmail connected'} · ${refreshedLabel}`
-    if (result.sync && result.coverage !== 'downloaded') elements.mailSource.textContent = result.sync.state === 'ready' ? `Gmail synced · ${syncTime(result.sync.completedAt)}` : result.sync.state === 'failed' ? 'Waiting for Gmail' : 'Syncing Gmail'
+    if (result.sync && result.coverage !== 'downloaded') elements.mailSource.textContent = result.sync.state === 'ready' ? `Gmail synced · ${syncTime(result.sync.completedAt)}` : result.sync.state === 'failed' ? waitingForGmailLabel(result.sync.error) : 'Syncing Gmail'
     renderList()
     const currentSummary = conversations.find(conversation => conversation.id === selectedConversationId)
     if (!activeDraft && !offlineMode && currentSummary && selectedSummary && (readerNeedsRetry || currentSummary.latestMessageId !== selectedSummary.latestMessageId)) {
@@ -3335,9 +4037,11 @@ async function refreshMailboxCounts(): Promise<void> {
 
 async function refreshSyncStatus(): Promise<void> {
   if (offlineMode) { elements.mailSource.textContent = 'Downloaded mail'; return }
-  void refreshMailboxCounts()
+  if (!inMessageWindow) void refreshMailboxCounts()
   try {
     const sync = await api.syncStatus()
+    elements.mailReconnect.hidden = !sync.reconnectRequired && !activeDraft?.reconnectRequired
+    void refreshQueuedDraft()
     if (sync.mailRevision !== undefined && observedMailRevision !== sync.mailRevision) {
       const changed = observedMailRevision !== undefined
       observedMailRevision = sync.mailRevision
@@ -3349,7 +4053,7 @@ async function refreshSyncStatus(): Promise<void> {
     }
     if (sync.state === 'failed') {
       if (/RATE_LIMITED|rateLimitExceeded|Retry after/i.test(sync.error ?? '')) {
-        elements.mailSource.textContent = 'Waiting for Gmail'
+        elements.mailSource.textContent = waitingForGmailLabel(sync.error)
         elements.mailSource.title = sync.error ?? ''
         if (syncErrorVisible) elements.mailError.hidden = true
         syncErrorVisible = true
@@ -3386,6 +4090,56 @@ async function refreshSyncStatus(): Promise<void> {
   }
 }
 
+let queuedDraftRefresh = false
+async function refreshQueuedDraft(): Promise<void> {
+  const draft = activeDraft
+  if (!draft || (!draft.syncState && !draft.conflict) || !draft.accountId || queuedDraftRefresh || draftSaveFlight || draftSendFlight || draftDiscarding) return
+  const session = draftEditSession
+  const revision = draftEditRevision
+  queuedDraftRefresh = true
+  try {
+    const fresh = await api.getDraft(draft.id, draft.accountId)
+    if (session !== draftEditSession || activeDraft?.id !== draft.id || draftSaveFlight || draftSendFlight || draftDiscarding) return
+    if (fresh.accountId !== draft.accountId || (fresh.id !== draft.id && fresh.resolvedFromDraftId !== draft.id)) throw new Error('Draft identity changed unexpectedly')
+    if (draftBase?.id === draft.id && fresh.id !== draft.id && fresh.resolvedFromDraftId === draft.id) draftBase = { ...draftBase, id: fresh.id }
+    if (!draftDirty && revision === draftEditRevision) showDraft(fresh, false)
+    else {
+      if (!fresh.syncState && fresh.resolvedFromDraftId) void linkDraftTask(fresh.resolvedFromDraftId, fresh).catch(error => console.error('Draft task binding needs reconnection:', error))
+      // Adopt only the confirmed identity. Text entered during the background save stays in the editor.
+      const confirmedSameRevision = !fresh.syncState && !fresh.conflict && fresh.draftRevision !== undefined && fresh.draftRevision === draft.draftRevision
+      if (confirmedSameRevision) draftBase = baselineSnapshot(fresh)
+      activeDraft = { ...activeDraft, id: fresh.id, gmailThreadId: fresh.gmailThreadId, gmailMessageId: fresh.gmailMessageId, draftRevision: fresh.draftRevision, syncState: fresh.syncState, syncError: fresh.syncError, reconnectRequired: fresh.reconnectRequired, conflict: fresh.conflict }
+      renderDraftConflict()
+      syncDraftEditLock()
+      checkpointDraft()
+      if (activeDraft.id && !activeDraft.conflict) autosaveDraft()
+    }
+  } catch {
+    if (session === draftEditSession && activeDraft?.id === draft.id) elements.recoveryStatus.textContent = 'Saved · waiting to confirm Gmail'
+  }
+  finally { queuedDraftRefresh = false }
+}
+
+elements.reconnectAccount.addEventListener('click', () => {
+  elements.reconnectAccount.disabled = true
+  elements.reconnectStatus.textContent = 'Opening sign-in…'
+  const browser = isNativeShell(window as { isTauri?: unknown }) ? null : window.open('about:blank', '_blank')
+  if (browser) browser.opener = null
+  void api.reconnectAccount().then(result => {
+    const url = new URL(result.authUrl)
+    if (url.protocol !== 'https:' || !['auth.openai.com', 'chatgpt.com', 'chat.openai.com'].includes(url.hostname)) throw new Error('Unexpected sign-in address')
+    if (browser) browser.location.href = url.href
+    const link = document.createElement('a')
+    link.href = url.href
+    link.textContent = 'Sign in'
+    elements.mailReconnect.append(link)
+    if (!browser) link.click()
+    link.remove()
+    elements.reconnectStatus.textContent = 'Finish sign-in in the browser. Your drafts will sync automatically.'
+  }).catch(error => { browser?.close(); elements.reconnectStatus.textContent = `Could not start sign-in: ${String(error)}` })
+    .finally(() => { elements.reconnectAccount.disabled = false })
+})
+
 function startSyncStatusWatch(): void {
   if (syncStatusTimer !== undefined) return
   void refreshSyncStatus()
@@ -3416,7 +4170,8 @@ async function connectMail(): Promise<void> {
         return option
       }))
     }
-    await loadConversations()
+    if (messageWindow) await openMessageWindowConversation(messageWindow)
+    else await loadConversations()
     if (accounts.length > 0) startSyncStatusWatch()
   } catch (error) {
     if (isServiceUnreachable(error) && performance.now() < mailStartupGraceUntil) {
@@ -3463,6 +4218,7 @@ function setDownloadedMode(value: boolean): void {
   void connectMail()
 }
 function persistSidebar(): void {
+  if (inMessageWindow) return
   localStorage.setItem('dispatch.ui.sidebar', mailboxesVisible ? sidebarStyle : 'hidden')
   localStorage.setItem('dispatch.ui.sidebar.last-visible', sidebarStyle)
 }
@@ -3485,6 +4241,10 @@ app.querySelectorAll<HTMLButtonElement>('[data-sidebar-style]').forEach(button =
 // Appearance lives in the native View menu. The shell mirrors the preference
 // (menu check marks and window theme) and forwards menu clicks as an event.
 const nativeTauri = (window as { __TAURI__?: { core?: { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }; event?: { listen: (name: string, handler: (event: { payload: unknown }) => void) => Promise<() => void> } } }).__TAURI__
+// File → Open in New Window (⌘O) in the native menu opens the selected conversation.
+if (isNativeShell(window as { isTauri?: unknown }) && !inMessageWindow) {
+  void nativeTauri?.event?.listen('dispatch://open-message-window', () => { if (activeDraft) void popOutDraft(); else if (selectedConversationId) void openInMessageWindow(selectedConversationId) })
+}
 if (isNativeShell(window as { isTauri?: unknown })) {
   const reportAppearance = () => { nativeTauri?.core?.invoke('set_appearance', { preference: theme.preference }).catch(() => {}) }
   reportAppearance()
@@ -3515,6 +4275,61 @@ function renderDensity(): void {
 }
 app.querySelector('[data-density]')?.addEventListener('click', () => { compactMessages = !compactMessages; localStorage.setItem('dispatch.ui.density', compactMessages ? 'compact' : 'comfortable'); renderDensity() })
 renderDensity()
+let gmailSyncRefresh: Promise<void> | undefined
+function refreshGmailSync(): Promise<void> {
+  if (gmailSyncRefresh) return gmailSyncRefresh
+  const status = app.querySelector<HTMLElement>('[data-gmail-sync-status]')!
+  const accounts = app.querySelector<HTMLElement>('[data-gmail-sync-accounts]')!
+  gmailSyncRefresh = api.directSyncStatus().then(result => {
+    status.textContent = result.error ?? (result.configured ? 'Connect each account once for incremental Gmail sync. Drafts and Codex keep their existing connection.' : 'Gmail uses your Codex connection. Direct sync needs a Google OAuth client registered for Dispatch before accounts can connect.')
+    accounts.replaceChildren()
+    for (const account of result.accounts) {
+      const row = document.createElement('div')
+      row.className = 'd-flex flex-wrap gap-2 align-items-center mb-3'
+      const label = document.createElement('span')
+      label.textContent = account.email
+      const button = document.createElement('button')
+      button.type = 'button'; button.className = 'btn btn-sm'
+      button.textContent = account.state === 'connected' ? 'Connected' : account.state === 'connecting' ? 'Signing in…' : account.state === 'reconnect' ? 'Reconnect' : 'Connect'
+      button.disabled = !result.configured || account.state === 'connected' || account.state === 'connecting'
+      button.addEventListener('click', () => {
+        button.disabled = true
+        const browser = isNativeShell(window as { isTauri?: unknown }) ? null : window.open('about:blank', '_blank')
+        if (browser) browser.opener = null
+        void api.connectDirectSync(account.accountId).then(result => {
+          if ('connected' in result) { browser?.close(); return refreshGmailSync() }
+          const url = new URL(result.authUrl)
+          if (url.protocol !== 'https:' || url.hostname !== 'accounts.google.com' || url.pathname !== '/o/oauth2/v2/auth') throw new Error('Unexpected Google sign-in address')
+          if (browser) browser.location.href = url.href
+          else {
+            const link = document.createElement('a'); link.href = url.href; link.textContent = 'Sign in to Google'
+            row.append(link); link.click(); link.remove()
+          }
+          status.textContent = 'Finish Google sign-in in your browser. Dispatch will start incremental sync automatically.'
+          return refreshGmailSync()
+        }).catch(error => { browser?.close(); status.textContent = `Could not connect Gmail sync: ${String(error)}`; button.disabled = false })
+      })
+      row.append(label, button)
+      if (account.state === 'connected' || account.state === 'reconnect') {
+        const existing = document.createElement('button'); existing.type = 'button'; existing.className = 'btn btn-sm'
+        existing.textContent = 'Use existing connection'
+        existing.addEventListener('click', () => {
+          existing.disabled = true
+          void api.useConnectorSync(account.accountId).then(refreshGmailSync).catch(error => { status.textContent = `Could not change Gmail sync: ${String(error)}`; existing.disabled = false })
+        })
+        row.append(existing)
+      }
+      if (account.error) { const error = document.createElement('span'); error.textContent = account.error; row.append(error) }
+      accounts.append(row)
+    }
+  }).catch(error => { status.textContent = `Gmail sync status is unavailable: ${String(error)}` }).finally(() => { gmailSyncRefresh = undefined })
+  return gmailSyncRefresh
+}
+app.querySelector('[data-gmail-sync-open]')?.addEventListener('click', () => {
+  closeActivity(); app.querySelector<HTMLDialogElement>('[data-gmail-sync-dialog]')!.show()
+  void refreshGmailSync()
+})
+window.setInterval(() => { if (app.querySelector<HTMLDialogElement>('[data-gmail-sync-dialog]')!.open) void refreshGmailSync() }, 5_000)
 function closeActivity(): void { app.querySelector<HTMLElement>('#dispatch-activity')!.hidden = true; app.querySelector('[data-activity-toggle]')!.setAttribute('aria-expanded', 'false') }
 app.querySelector('[data-activity-toggle]')?.addEventListener('click', () => {
   const panel = app.querySelector<HTMLElement>('#dispatch-activity')!; panel.hidden = !panel.hidden
@@ -3522,7 +4337,7 @@ app.querySelector('[data-activity-toggle]')?.addEventListener('click', () => {
 })
 for (const selector of ['[data-offline-open]']) app.querySelector(selector)?.addEventListener('click', closeActivity)
 document.addEventListener('click', event => { if (!(event.target as Element).closest('.dispatch-mail-activity')) closeActivity() })
-for (const name of ['offline']) {
+for (const name of ['offline', 'gmail-sync']) {
   const dialog = app.querySelector<HTMLDialogElement>(`[data-${name}-dialog]`)!
   dialog.addEventListener('close', () => app.querySelector<HTMLButtonElement>('[data-activity-toggle]')?.focus())
 }
@@ -3538,14 +4353,29 @@ void refreshUtilities()
 window.setInterval(() => { if (offlineStatus?.download?.state === 'running' || app.querySelector<HTMLDialogElement>('[data-offline-dialog]')!.open) void refreshUtilities() }, 5000)
 
 async function start(): Promise<void> {
+  if (messageWindowAddressError) return
   await Promise.all([connectMail(), connectAgent()])
 }
+if (inMessageWindow) {
+  // Errors show above the message; the list pane that normally holds them is hidden.
+  elements.readerPanel.prepend(elements.mailError, elements.mailReconnect)
+  elements.readerEmpty.textContent = messageWindowAddressError ?? 'Loading message…'
+  document.title = 'Message'
+  window.addEventListener('pagehide', () => { messageWindowChannel?.postMessage({ type: 'closed' }) })
+} else messageWindowChannel?.addEventListener('message', (event) => {
+  if (event.data?.type === 'draft-opened' && typeof event.data.key === 'string') { draftWindowTransfers.delete(event.data.key); return }
+  // A closed message window may leave a local draft for this window to save.
+  if ((event.data as { type?: unknown } | null)?.type === 'closed') { scheduleDraftSync(0); return }
+  const moved = readMovedInMessageWindow(event.data)
+  if (moved) acceptMoveFromMessageWindow(moved)
+})
 
 window.addEventListener('pointerdown', unlockTone, { once: true })
 window.addEventListener('keydown', unlockTone, { once: true })
 let refreshRequest: Promise<void> | undefined
 let lastAutomaticRefresh = 0
 function requestMailRefresh(reason: 'manual' | 'wake' | 'foreground' = 'manual'): Promise<void> {
+  if (inMessageWindow && reason !== 'manual') return Promise.resolve()
   if (offlineMode || refreshRequest) return refreshRequest ?? Promise.resolve()
   if (reason === 'foreground' && Date.now() - lastAutomaticRefresh < 10_000) return Promise.resolve()
   const button = app.querySelector<HTMLButtonElement>('[data-refresh]')!
@@ -3628,11 +4458,14 @@ elements.spam.addEventListener('click', () => { void mutateSelected('spam') })
 elements.trash.addEventListener('click', () => { void mutateSelected('trash') })
 elements.moveInbox.addEventListener('click', () => { void mutateSelected('inbox') })
 app.querySelector('[data-ask]')?.addEventListener('click', askCodex)
-app.querySelector('[data-save-draft]')?.addEventListener('click', () => { void saveDraft().catch((error) => addAgentMessage('error', error instanceof Error ? error.message : String(error))) })
+app.querySelector('[data-save-draft]')?.addEventListener('click', () => { void saveDraft().catch(draftError) })
+app.querySelector('[data-pop-out-draft]')?.addEventListener('click', () => { void popOutDraft() })
+elements.useGmailVersion.addEventListener('click', () => { void resolveDraftConflict('use-remote') })
+elements.keepLocalEdits.addEventListener('click', () => { void resolveDraftConflict('keep-local') })
 app.querySelector('[data-send-draft]')?.addEventListener('click', sendDraft)
 app.querySelector('[data-send-cancel]')?.addEventListener('click', () => { elements.sendConfirm.hidden = true })
 app.querySelector('[data-send-confirm-go]')?.addEventListener('click', () => { void confirmSendDraft().catch(draftError) })
-app.querySelector('[data-discard-draft]')?.addEventListener('click', () => { void discardDraft().catch(draftError) })
+app.querySelector('[data-discard-draft]')?.addEventListener('click', () => { void discardDraft().catch(discardError) })
 app.querySelector('[data-attach-draft]')?.addEventListener('click', () => { elements.draftFiles.click() })
 elements.draftFiles.addEventListener('change', () => { void attachDraftFiles() })
 elements.draftBody.addEventListener('input', () => {
@@ -3676,14 +4509,9 @@ elements.draftSubject.addEventListener('input', () => {
 elements.draftAccount.addEventListener('input', () => { markDraftDirty(); elements.sendConfirm.hidden = true })
 app.querySelector('[data-revise-draft]')?.addEventListener('click', () => { void reviseDraft().catch(draftError) })
 elements.readState.addEventListener('click', () => { void toggleReadState() })
-app.querySelector('[data-send]')?.addEventListener('click', () => { void sendPrompt() })
-elements.stop.addEventListener('click', () => {
-  if (threadId && activeTurnId) void api.interruptTurn(threadId, activeTurnId)
-})
-app.querySelectorAll<HTMLElement>('[data-suggestion]').forEach((button) => button.addEventListener('click', () => {
-  elements.prompt.value = button.dataset.suggestion ?? ''
-  elements.prompt.focus()
-}))
+elements.send.addEventListener('click', () => { void sendPrompt() })
+elements.stop.addEventListener('click', () => { void stopCodexTurn() })
+elements.prompt.addEventListener('input', renderAgentComposer)
 elements.prompt.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault()
@@ -3721,11 +4549,22 @@ function resetLabel(resetsAt: number | null): string {
 }
 function renderModelPicker(): void {
   const model = currentModel()
-  elements.modelLabel.textContent = modelToggleText(model)
-  elements.modelToggle.classList.toggle('bg-blue-lt', model.exhausted !== true)
-  elements.modelToggle.classList.toggle('text-blue', model.exhausted !== true)
-  elements.modelToggle.classList.toggle('bg-yellow-lt', model.exhausted === true)
-  elements.modelToggle.classList.toggle('text-yellow', model.exhausted === true)
+  const long = document.createElement('span')
+  long.className = 'dispatch-model-long'
+  long.textContent = model.label
+  const effort = selectedEffort || modelCatalog?.defaults.effort || ''
+  if (effort && model.id) {
+    const suffix = document.createElement('span')
+    suffix.className = 'dispatch-model-effort'
+    suffix.textContent = ` · ${effortLabel(effort)}`
+    long.append(suffix)
+  }
+  const short = document.createElement('span')
+  short.className = 'dispatch-model-short'
+  short.dataset.label = model.label.replace(/^GPT-(\S+)\s+(.+)$/i, '$2 $1')
+  elements.modelLabel.replaceChildren(long, short)
+  elements.modelToggle.title = modelToggleText(model)
+  elements.modelToggle.dataset.exhausted = String(model.exhausted === true)
   if (modelCatalogError) elements.modelSummary.textContent = modelCatalogError
   else if (!modelCatalog) elements.modelSummary.textContent = 'Loading models'
   else if (model.exhausted === true) elements.modelSummary.textContent = `${model.label} has reached its usage limit. Pick another model.`
@@ -3815,7 +4654,7 @@ function setModelMenu(open: boolean): void {
   elements.modelMenu.hidden = !open
   elements.modelMenu.classList.toggle('show', open)
   elements.modelToggle.setAttribute('aria-expanded', String(open))
-  if (open) void refreshModelCatalog()
+  if (open) { setPermissionsMenu(false); void refreshModelCatalog() }
 }
 elements.modelToggle.addEventListener('click', (event) => {
   event.stopPropagation()
@@ -3823,6 +4662,108 @@ elements.modelToggle.addEventListener('click', (event) => {
 })
 renderModelPicker()
 void refreshModelCatalog()
+const EXECUTION_MODES: readonly { mode: ExecutionPreferences['mode']; label: string; description: string }[] = [
+  { mode: 'full-access', label: 'Full access', description: 'Default. Run commands and use tools without command approval prompts.' },
+  { mode: 'workspace', label: 'Workspace', description: 'Limit commands to the Dispatch workspace. Ask for access outside it.' },
+]
+
+function renderExecutionPreferences(): void {
+  const choice = EXECUTION_MODES.find(candidate => candidate.mode === executionPreferences?.mode)
+  elements.permissionsLabel.textContent = choice?.label ?? 'Permissions'
+  elements.permissionsToggle.title = choice ? `Codex permissions: ${choice.label}. Changes apply to the next turn.` : 'Choose Codex permissions'
+  elements.permissionsStatus.textContent = executionPreferenceSaving ? 'Saving…' : executionPreferenceError
+    ?? (executionPreferences ? 'Saved for all Dispatch chats. Changes apply to the next turn.' : 'Loading saved setting…')
+  elements.permissionsStatus.classList.toggle('text-danger', Boolean(executionPreferenceError))
+  elements.permissionsList.replaceChildren()
+  for (const candidate of EXECUTION_MODES) {
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'dropdown-item dispatch-model-option'
+    row.dataset.executionMode = candidate.mode
+    row.setAttribute('role', 'menuitemradio')
+    row.setAttribute('aria-checked', String(candidate.mode === executionPreferences?.mode))
+    row.disabled = executionPreferenceSaving
+    const name = document.createElement('span')
+    name.textContent = candidate.label
+    row.append(name)
+    if (candidate.mode === executionPreferences?.mode) {
+      const check = document.createElement('i')
+      check.className = 'ti ti-check ms-auto'
+      check.setAttribute('aria-hidden', 'true')
+      row.append(check)
+    }
+    const description = document.createElement('span')
+    description.className = 'text-secondary small dispatch-model-note'
+    description.textContent = candidate.description
+    row.append(description)
+    row.addEventListener('click', event => {
+      event.stopPropagation()
+      void selectExecutionMode(candidate.mode)
+    })
+    elements.permissionsList.append(row)
+  }
+}
+
+async function refreshExecutionPreferences(): Promise<void> {
+  if (executionPreferenceSaving) return
+  if (executionPreferenceRequest) return executionPreferenceRequest
+  executionPreferenceRequest = (async () => {
+    try {
+      executionPreferences = await api.executionPreferences()
+      executionPreferenceError = undefined
+    } catch (error) {
+      executionPreferenceError = error instanceof Error ? error.message : String(error)
+    } finally {
+      executionPreferenceRequest = undefined
+      renderExecutionPreferences()
+    }
+  })()
+  return executionPreferenceRequest
+}
+
+async function selectExecutionMode(mode: ExecutionPreferences['mode']): Promise<void> {
+  if (executionPreferenceSaving) return
+  // Finish an older read before saving, so it cannot overwrite the confirmed choice.
+  executionPreferenceSaving = true
+  if (executionPreferenceRequest) await executionPreferenceRequest
+  executionPreferenceError = undefined
+  renderExecutionPreferences()
+  try {
+    executionPreferences = await api.saveExecutionPreferences(mode)
+  } catch (error) {
+    executionPreferenceError = error instanceof Error ? error.message : String(error)
+  } finally {
+    executionPreferenceSaving = false
+    const restoreFocus = elements.permissionsMenu.contains(document.activeElement) || document.activeElement === document.body
+    renderExecutionPreferences()
+    if (!elements.permissionsMenu.hidden && restoreFocus) elements.permissionsMenu.querySelector<HTMLButtonElement>(`[data-execution-mode="${mode}"]`)?.focus()
+  }
+}
+
+function setPermissionsMenu(open: boolean): void {
+  elements.permissionsMenu.hidden = !open
+  elements.permissionsMenu.classList.toggle('show', open)
+  elements.permissionsToggle.setAttribute('aria-expanded', String(open))
+  if (open) { setModelMenu(false); void refreshExecutionPreferences() }
+}
+
+elements.permissionsToggle.addEventListener('click', event => {
+  event.stopPropagation()
+  setPermissionsMenu(elements.permissionsMenu.hidden)
+})
+elements.permissionsMenu.addEventListener('keydown', event => {
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const options = [...elements.permissionsList.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')]
+  const current = options.indexOf(document.activeElement as HTMLButtonElement)
+  const index = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
+    : event.key === 'ArrowDown' ? (current + 1) % options.length : (current + options.length - 1) % options.length
+  options[index]?.focus()
+})
+renderExecutionPreferences()
+void refreshExecutionPreferences()
+window.addEventListener('focus', () => { void refreshExecutionPreferences() })
+
 let setupReturnFocus: HTMLElement | null = null
 
 function hideSetup(): void {
@@ -3843,7 +4784,7 @@ function showSetup(): void {
   elements.setupHeading.focus()
 }
 
-if (setupSeen(localStorage)) elements.setup.hidden = true
+if (setupSeen(localStorage) || inMessageWindow) elements.setup.hidden = true
 else showSetup()
 elements.setupContinue.addEventListener('click', hideSetup)
 elements.setupLater.addEventListener('click', hideSetup)
@@ -3874,6 +4815,7 @@ document.addEventListener('click', (event) => {
   if (!elements.folderMenu.hidden && !elements.folderMenu.contains(event.target as Node)) setFolderMenu(false)
   if (!elements.readerMenu.hidden && !elements.readerMenu.contains(event.target as Node)) setReaderMenu(false)
   if (!elements.modelMenu.hidden && !elements.modelMenu.contains(event.target as Node)) setModelMenu(false)
+  if (!elements.permissionsMenu.hidden && !elements.permissionsMenu.contains(event.target as Node)) setPermissionsMenu(false)
 })
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return
@@ -3883,6 +4825,7 @@ document.addEventListener('keydown', (event) => {
   setFolderMenu(false)
   setReaderMenu(false)
   setModelMenu(false)
+  if (!elements.permissionsMenu.hidden) { setPermissionsMenu(false); elements.permissionsToggle.focus() }
 })
 window.addEventListener('resize', renderPanels)
 window.addEventListener('keydown', (event) => {
@@ -3987,7 +4930,7 @@ window.addEventListener('keydown', (event) => {
   }
   const command = resolved.command
   const hasThread = Boolean(selectedConversationId) || selection.ids.length > 1
-  if (typeof command === 'object') { switchMailbox(command.goto); return }
+  if (typeof command === 'object') { if (!inMessageWindow) switchMailbox(command.goto); return }
   switch (command) {
     case 'reply': if (selected) void openDraft(false).catch((error) => addAgentMessage('error', error instanceof Error ? error.message : String(error))); return
     case 'replyAll': if (selected) void openDraft(true).catch((error) => addAgentMessage('error', error instanceof Error ? error.message : String(error))); return
@@ -3998,8 +4941,9 @@ window.addEventListener('keydown', (event) => {
     case 'toggleRead': if (selected && !elements.readState.hidden) void toggleReadState(); return
     case 'next': moveSelection(1, false); return
     case 'previous': moveSelection(-1, false); return
-    case 'compose': openCompose(); return
+    case 'compose': if (!inMessageWindow) openCompose(); return
     case 'ask': if (selected) askCodex(); return
+    case 'openWindow': if (activeDraft) void popOutDraft(); else if (selectedConversationId) void openInMessageWindow(selectedConversationId); return
     case 'help': shortcutsDialog.showModal(); return
   }
 })

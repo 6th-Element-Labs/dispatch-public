@@ -18,13 +18,16 @@ async function fixture() {
   const gate = new Promise<void>(resolve => { releaseRead = resolve })
   let releaseSync: (() => void) | undefined
   const syncGate = new Promise<void>(resolve => { releaseSync = resolve })
-  const state = { threadMessages: undefined as ReturnType<typeof message>[] | undefined, failUpdate: false, trashed: false, failTrash: false, deleted: [] as string[][], holdSync: false, syncCalls: 0, releaseSync: () => releaseSync!(), holdRead: false, releaseRead: () => releaseRead!(), reads: 0, sends: 0, threadError: '', sendError: false, verifyError: false, to: 'ana@example.com' }
+  const state = { threadMessages: undefined as ReturnType<typeof message>[] | undefined, failUpdate: false, trashed: false, failTrash: false, limitDrafts: false, limitDiscard: false, limitThread: false, draftsReply: undefined as unknown, deleted: [] as string[][], holdSync: false, syncCalls: 0, releaseSync: () => releaseSync!(), holdRead: false, releaseRead: () => releaseRead!(), reads: 0, sends: 0, threadError: '', sendError: false, verifyError: false, to: 'ana@example.com' }
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk))
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {}
     const reply = (value: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)) }
     if (req.url === '/v1/connectors/gmail') return reply({ accounts: [account] })
+    if (req.url === '/v1/connectors/gmail/read-thread' && state.limitThread) return reply({ error: 'gmail_thread_read_failed', detail: 'GmailApiError: RATE_LIMITED userRateLimitExceeded' }, 502)
     if (req.url === '/v1/connectors/gmail/read-thread') { state.reads++; if (state.holdRead) await gate; return state.threadError ? reply({ error: state.threadError }, 503) : reply({ structuredContent: { messages: state.threadMessages ?? [message()] } }) }
+    if (req.url === '/v1/connectors/gmail/drafts/list' && state.draftsReply !== undefined) return reply(state.draftsReply)
+    if (req.url === '/v1/connectors/gmail/drafts/list' && state.limitDrafts) return reply({ isError: true, structuredContent: { error: 'GmailApiError: Failed to list drafts', error_code: 'RATE_LIMITED', error_data: { code: 'rateLimitExceeded', message: 'User-rate limit exceeded.  Retry after 2099-01-01T00:00:00.000Z' } } })
     if (req.url === '/v1/connectors/gmail/drafts/list') return reply({ structuredContent: { drafts: state.trashed ? [] : [{ draft_id: 'd1', message_id: 'draft-message', thread_id: 't1', to: ['ana@example.com'], cc: ['cc@example.com'], bcc: ['bcc@example.com'], subject: 'Delivery' }] } })
     if (req.url === '/v1/connectors/gmail/read') {
       if (body.messageId === 'sent' && state.verifyError) return reply({ error: 'temporarily unavailable' }, 503)
@@ -32,6 +35,7 @@ async function fixture() {
       if (body.messageId === 'sent') value.payload.headers[1]!.value = state.to
       return reply({ structuredContent: value })
     }
+    if (req.url === '/v1/connectors/gmail/drafts/discard' && state.limitDiscard) return reply({ isError: true, structuredContent: { error: 'gmail.delete_draft: RATE_LIMITED' } })
     if (req.url === '/v1/connectors/gmail/drafts/discard') return reply({ error: 'gmail_draft_discard_unavailable' }, 503)
     if (req.url === '/v1/connectors/gmail/delete') { state.deleted.push(body.messageIds); state.trashed = !state.failTrash; return reply({ structuredContent: { responses: [{ message_id: body.messageIds[0], success: !state.failTrash }] } }) }
     if (req.url === '/v1/connectors/gmail/drafts/update') return reply(state.failUpdate ? { isError: true, structuredContent: { error: 'recipient rejected' } } : { structuredContent: { draft_id: 'd1' } })
@@ -60,6 +64,16 @@ it('keeps full opened threads across restart and does no connector read in downl
   expect(f.state.reads).toBe(1)
   f.state.threadError = 'timeout'; expect((await restarted.readConversation('one', 't1')).availability?.mode).toBe('downloaded')
   f.state.threadError = '404 not found'; await expect(restarted.readConversation('one', 't1')).rejects.toThrow('404')
+})
+it('opens the downloaded copy while Gmail rate limits the account', async () => {
+  const f = await fixture(); const p = f.open()
+  expect((await p.readConversation('one', 't1')).availability?.mode).toBe('live')
+  f.state.limitThread = true
+  const first = await p.readConversation('one', 't1')
+  expect(first.availability).toMatchObject({ mode: 'downloaded', reason: 'Gmail is limiting requests from this account.' })
+  // The account is now paused, so the second read never reaches Gmail.
+  expect((await p.readConversation('one', 't1')).messages[0]?.body.content).toContain('Full saved body')
+  expect(f.state.reads).toBe(1)
 })
 it('downloads the selected indexed mailbox and reuses complete current copies', async () => {
   const f = await fixture(); const p = f.open(); await p.syncNow()
@@ -135,6 +149,33 @@ it('discards only the exact draft message when the connector has Trash but no de
   await p.discardGmailDraft('one', 'd1')
   expect(f.state.deleted).toEqual([['draft-message']])
   expect(f.state.trashed).toBe(true)
+})
+it('treats a draft Gmail no longer lists as already discarded, without a Trash call', async () => {
+  const f = await fixture(); const p = f.open(); f.state.trashed = true
+  await expect(p.discardGmailDraft('one', 'd1')).resolves.toBeUndefined()
+  expect(f.state.deleted).toEqual([])
+})
+it('does not call a draft Dispatch just saved gone while Gmail\'s drafts list lags', async () => {
+  const f = await fixture(); const p = f.open()
+  const saved = await p.createGmailDraft('one', '', 'ana@example.com', '', '', 'Fresh', 'Just saved')
+  await expect(p.discardGmailDraft('one', saved.id)).rejects.toMatchObject({ code: 'gmail_draft_list_lag' })
+  expect(f.state.deleted).toEqual([])
+})
+it('refuses to call a draft gone when the drafts list reply has no drafts', async () => {
+  const f = await fixture(); const p = f.open(); f.state.draftsReply = { structuredContent: {} }
+  await expect(p.discardGmailDraft('one', 'd1')).rejects.toThrow('Gmail drafts list returned no drafts array')
+  expect(f.state.deleted).toEqual([])
+})
+it('keeps the draft and names Gmail\'s wait when the drafts list is rate limited', async () => {
+  const f = await fixture(); const p = f.open(); f.state.limitDrafts = true
+  await expect(p.discardGmailDraft('one', 'd1')).rejects.toMatchObject({ code: 'gmail_backoff', message: expect.stringContaining('RATE_LIMITED') })
+  await expect(p.discardGmailDraft('one', 'd1')).rejects.toMatchObject({ code: 'gmail_backoff', message: expect.stringContaining('Retry after 2099-01-01T00:00:00.000Z') })
+  expect(f.state.deleted).toEqual([])
+})
+it('keeps a rate limit on delete_draft typed as Gmail\'s wait, not as a missing discard tool', async () => {
+  const f = await fixture(); const p = f.open(); f.state.limitDiscard = true
+  await expect(p.discardGmailDraft('one', 'd1')).rejects.toMatchObject({ code: 'gmail_backoff' })
+  expect(f.state.deleted).toEqual([])
 })
 it('does not claim a draft was discarded when Gmail rejects the Trash action', async () => {
   const f = await fixture(); const p = f.open(); f.state.failTrash = true

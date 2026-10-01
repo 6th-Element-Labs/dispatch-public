@@ -7,6 +7,7 @@ export function installWebLinks(root: HTMLElement, win: LinkWindow, onError: (er
     const target = event.target instanceof Element ? event.target : undefined
     const anchor = target?.closest<HTMLAnchorElement>('a[href]')
     if (!anchor || !root.contains(anchor) || event.defaultPrevented || event.button > 1) return
+    if (anchor.closest('[contenteditable="true"]')) { event.preventDefault(); return }
     const href = anchor.getAttribute('href')?.trim() ?? ''
     if (!href || href.startsWith('#')) return
     let url: URL

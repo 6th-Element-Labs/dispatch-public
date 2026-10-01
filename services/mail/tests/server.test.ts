@@ -12,7 +12,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))))
 })
 
-async function start(options: Parameters<typeof createMailServer>[1] = {}) {
+async function start(options: Parameters<typeof createMailServer>[1] = {}, providerOverrides: Partial<NonNullable<Parameters<typeof createMailServer>[0]>> = {}) {
   const server = createMailServer({
     accounts: async () => [],
     listMessages: async () => [],
@@ -21,6 +21,7 @@ async function start(options: Parameters<typeof createMailServer>[1] = {}) {
     listConversations: async () => [],
     listUnifiedConversations: async () => [],
     readConversation: async () => { throw new Error('not configured') },
+    ...providerOverrides,
   }, { demoEnabled: true, ...options })
   servers.push(server)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -29,6 +30,19 @@ async function start(options: Parameters<typeof createMailServer>[1] = {}) {
 }
 
 describe('dispatch-mail', () => {
+  it('exposes direct sync connection status and rejects sign-in commands from foreign origins', async () => {
+    const connect = vi.fn(async () => ({ authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=fixture' }))
+    const base = await start({}, {
+      directSyncStatus: async () => ({ configured: true, accounts: [{ accountId: 'one', email: 'work@example.com', state: 'connector' }] }),
+      connectDirectSync: connect,
+    })
+    expect(await (await fetch(`${base}/v1/gmail-sync`)).json()).toMatchObject({ directSync: { configured: true } })
+    const foreign = await fetch(`${base}/v1/gmail-sync`, { method: 'POST', headers: { origin: 'https://untrusted.example', 'content-type': 'application/json' }, body: JSON.stringify({ accountId: 'one' }) })
+    expect(foreign.status).toBe(403); expect(connect).not.toHaveBeenCalled()
+    expect((await fetch(`${base}/v1/gmail-sync`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(400)
+    const result = await fetch(`${base}/v1/gmail-sync`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ accountId: 'one' }) })
+    expect(result.status).toBe(200); expect(connect).toHaveBeenCalledWith('one')
+  })
   it('suggests demo recipients from known senders', async () => {
     const base = await start()
     const value = await (await fetch(`${base}/v1/recipients?q=ana`)).json() as { recipients: Array<{ address: string }> }
@@ -92,6 +106,17 @@ describe('dispatch-mail', () => {
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({ opened: true, filename: 'notes.txt' })
     expect(await readFile(openedPath, 'utf8')).toBe('hello')
+    const empty = await fetch(`${base}/v1/drafts/attachments/open`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ filename: 'empty.bin', contentBase64: '' }),
+    })
+    expect(empty.status).toBe(200)
+    expect(await readFile(openedPath)).toHaveLength(0)
+    const malformedAccount = await fetch(`${base}/v1/drafts/attachments/open`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ filename: 'empty.bin', contentBase64: '', accountId: 42 }),
+    })
+    expect(malformedAccount.status).toBe(400)
     const invalid = await fetch(`${base}/v1/drafts/attachments/open`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ filename: 'notes.txt', contentBase64: 'not base64!' }),
@@ -557,4 +582,75 @@ it('serves demo mailbox counts when no Gmail account is connected', async () => 
   expect(body.source).toBe('demo')
   expect(body.counts.inbox).toBeGreaterThan(0)
   expect(body.counts).toMatchObject({ drafts: 0, spam: 0 })
+})
+
+it('acknowledges durable draft commands as pending and preserves omitted fields at the REST boundary', async () => {
+  const enqueue = vi.fn(() => ({ ...projectDraft({ id: 'queued-one', accountId: 'one', inReplyToMessageId: '', to: [], subject: '', bodyMarkdown: '' }), syncState: 'pending' as const }))
+  const server = createMailServer({ accounts: async () => [], listMessages: async () => [], listUnifiedMessages: async () => [], readMessage: async () => { throw new Error('not configured') }, listConversations: async () => [], listUnifiedConversations: async () => [], readConversation: async () => { throw new Error('not configured') }, enqueueDraftSave: enqueue })
+  servers.push(server); await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  const response = await fetch(`${base}/v1/draft-saves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ accountId: 'one', draftId: 'existing', to: 'new@example.com' }) })
+  expect(response.status).toBe(202)
+  expect(await response.json()).toMatchObject({ draft: { id: 'queued-one', syncState: 'pending' } })
+  expect(enqueue).toHaveBeenCalledExactlyOnceWith('one', '', { to: 'new@example.com' }, 'existing', undefined)
+  for (const input of [{ accountId: 'one', bodyMarkdown: 1 }, { accountId: 'one' }, { accountId: 'one', attachments: [{}] }, { accountId: 'one', draftId: '', to: 'x' }]) {
+    expect((await fetch(`${base}/v1/draft-saves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })).status).toBe(400)
+  }
+  expect(enqueue).toHaveBeenCalledTimes(1)
+})
+
+it('accepts durable attachment operations and exposes conflict resolution and archived copies', async () => {
+  const attachmentDraft = { ...projectDraft({ id: 'existing', accountId: 'one', inReplyToMessageId: '', to: [], subject: 'Saved', bodyMarkdown: '' }), syncState: 'pending' as const }
+  const attachDraftFiles = vi.fn(async () => ({ draft: attachmentDraft, operationId: '123e4567-e89b-42d3-a456-426614174000', syncState: 'pending' as const, verifiedFiles: [] }))
+  const resolveDraftConflict = vi.fn(async () => ({ ...projectDraft({ id: 'existing', accountId: 'one', inReplyToMessageId: '', to: [], subject: 'Saved', bodyMarkdown: '' }), draftRevision: 4 }))
+  const conflictDraft = projectDraft({ id: 'existing', accountId: 'one', inReplyToMessageId: '', to: [], subject: 'Saved', bodyMarkdown: '' })
+  const conflictCopies = vi.fn((accountId?: string) => [{ id: 'copy-1', accountId: accountId ?? 'one', draftId: 'existing', local: conflictDraft, remote: conflictDraft, choice: 'use-remote' as const, createdAt: '2026-09-30T00:00:00.000Z' }])
+  const base = await start({}, { attachDraftFiles, resolveDraftConflict, conflictCopies })
+  const attached = await fetch(`${base}/v1/drafts/existing/attachments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ accountId: 'one', operationId: '123e4567-e89b-42d3-a456-426614174000', paths: ['/tmp/file.txt'] }) })
+  expect(attached.status).toBe(202)
+  expect(attachDraftFiles).toHaveBeenCalledExactlyOnceWith('one', 'existing', ['/tmp/file.txt'], '123e4567-e89b-42d3-a456-426614174000')
+
+  const resolved = await fetch(`${base}/v1/draft-saves/existing/conflict`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ accountId: 'one', choice: 'use-remote', expectedRevision: 3 }) })
+  expect(resolved.status).toBe(200)
+  expect(await resolved.json()).toMatchObject({ draft: { id: 'existing', draftRevision: 4 } })
+  expect(resolveDraftConflict).toHaveBeenCalledExactlyOnceWith('one', 'existing', 'use-remote', 3)
+
+  const archived = await fetch(`${base}/v1/draft-conflicts?account=one`)
+  expect(await archived.json()).toMatchObject({ conflicts: [{ id: 'copy-1', accountId: 'one', draftId: 'existing', choice: 'use-remote' }] })
+  expect(conflictCopies).toHaveBeenCalledExactlyOnceWith('one')
+})
+
+it('maps the draft queue revision-change error to a conflict response', async () => {
+  const resolveDraftConflict = async () => { throw Object.assign(new Error('Draft changed while resolving.'), { code: 'draft_revision_changed' }) }
+  const base = await start({}, { resolveDraftConflict })
+  const response = await fetch(`${base}/v1/draft-saves/existing/conflict`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ accountId: 'one', choice: 'keep-local', expectedRevision: 3 }),
+  })
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ error: 'draft_revision_changed' })
+})
+
+it('returns typed conflicts when an accepted attachment operation was cancelled or removed', async () => {
+  const attachDraftFiles = vi.fn()
+    .mockRejectedValueOnce(Object.assign(new Error('append cancelled'), { code: 'draft_attachment_operation_cancelled' }))
+    .mockRejectedValueOnce(Object.assign(new Error('append was removed'), { code: 'draft_attachment_not_present' }))
+  const base = await start({}, { attachDraftFiles })
+  const body = JSON.stringify({ accountId: 'one', operationId: '123e4567-e89b-42d3-a456-426614174000', paths: ['/tmp/file.txt'] })
+  const cancelled = await fetch(`${base}/v1/drafts/queued-one/attachments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+  expect(cancelled.status).toBe(409)
+  expect(await cancelled.json()).toMatchObject({ error: 'draft_attachment_operation_cancelled' })
+  const removed = await fetch(`${base}/v1/drafts/queued-two/attachments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+  expect(removed.status).toBe(409)
+  expect(await removed.json()).toMatchObject({ error: 'draft_attachment_not_present' })
+})
+
+it('reports whether a Gmail attachment is already cached without downloading it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dispatch-attachment-status-'))
+  const readAttachment = vi.fn(async () => { throw new Error('status must be local only') })
+  const base = await start({ attachmentCacheDir: directory }, { readAttachment })
+  const status = await fetch(`${base}/v1/messages/message/attachments/attachment/status?account=one&filename=file.pdf`)
+  expect(status.status).toBe(200)
+  expect(await status.json()).toEqual({ cached: false })
+  expect(readAttachment).not.toHaveBeenCalled()
 })

@@ -22,6 +22,16 @@ describe('codexMailEffect', () => {
     })).toEqual({ kind: 'draft', draftId: 'draft-9', accountId: 'link-two' })
   })
 
+  it('refreshes the editor after Codex resolves a draft conflict', () => {
+    expect(codexMailEffect({
+      type: 'mcpToolCall',
+      status: 'completed',
+      server: 'dispatch_mail',
+      tool: 'resolve_draft_conflict',
+      result: { structuredContent: { draft: { id: 'queued-9', accountId: 'link-one', draftRevision: 14 } } },
+    })).toEqual({ kind: 'draft', draftId: 'queued-9', accountId: 'link-one' })
+  })
+
   it('treats a user-asked Gmail send as a sent effect', () => {
     expect(codexMailEffect({
       type: 'mcpToolCall',

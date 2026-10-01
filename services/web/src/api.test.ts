@@ -89,6 +89,38 @@ describe('draft API', () => {
     })
   })
 
+  it('sends durable draft commands without the legacy body alias or an invented empty body', async () => {
+    const draft = { id: 'queued-1' }
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ draft }))
+    vi.stubGlobal('fetch', fetch)
+    const base = { id: 'draft-1', accountId: 'one', inReplyToMessageId: 'message-1', to: [], cc: '', bcc: '', subject: 'Original', bodyMarkdown: 'Before', attachments: [], state: 'draft' }
+
+    await api.saveDraft({ accountId: 'one', draftId: 'draft-1', subject: 'Updated', bodyText: 'New text', base })
+    await api.saveDraft({ accountId: 'one', draftId: 'draft-1', subject: 'Subject only' })
+
+    expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toEqual({
+      accountId: 'one', draftId: 'draft-1', subject: 'Updated', bodyMarkdown: 'New text', base,
+    })
+    expect(JSON.parse(String(fetch.mock.calls[1]?.[1]?.body))).toEqual({
+      accountId: 'one', draftId: 'draft-1', subject: 'Subject only',
+    })
+  })
+
+  it('resolves a draft conflict with its expected durable revision', async () => {
+    const draft = { id: 'draft-1' }
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ draft }))
+    vi.stubGlobal('fetch', fetch)
+
+    await expect(api.resolveDraftConflict('draft/1', 'one', 'keep-local', 9)).resolves.toEqual(draft)
+    expect(fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:8411/v1/draft-saves/draft%2F1/conflict',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ accountId: 'one', choice: 'keep-local', expectedRevision: 9 }),
+      }),
+    )
+  })
+
   it('asks mail for recipient suggestions', async () => {
     const fetch = vi.fn(async () => jsonResponse({ recipients: [{ name: 'Ana', address: 'ana@example.com', initials: 'A' }] }))
     vi.stubGlobal('fetch', fetch)

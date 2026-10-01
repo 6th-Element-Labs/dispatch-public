@@ -60,5 +60,5 @@ export function conversationForMailbox(conversation: ConversationProjection, mai
     return !labels.has('TRASH') && !labels.has('SPAM') && !labels.has('DRAFT')
   })
   if (!visible.length) throw Object.assign(new Error(`No messages in this conversation are available in ${mailbox}. Refresh the mailbox.`), { code: 'conversation_not_in_mailbox' })
-  return projectConversation(visible, conversation.source)
+  return { ...projectConversation(visible, conversation.source), ...(conversation.completeness ? { completeness: conversation.completeness } : {}) }
 }

@@ -1,9 +1,9 @@
 /**
- * Minimal MIME reader for one purpose: pull a single attachment out of a raw
- * RFC 2822 message when the Gmail connector refuses to serve it through
- * `read_attachment` (it rejects types it cannot extract text from, such as
- * calendar invites). Gmail's `read_email` with `format: "raw"` returns the
- * whole message base64url-encoded, which always contains the bytes.
+ * Minimal MIME reader for raw RFC 2822 messages. Gmail's `read_email` with
+ * `format: "raw"` returns the whole message base64url-encoded, which always
+ * contains the bytes. Dispatch reads it when the connector cannot serve a part
+ * itself: attachments `read_attachment` refuses (such as calendar invites), and
+ * text parts in charsets other than UTF-8, which the connector decodes wrongly.
  */
 
 export interface MimePart {
@@ -19,6 +19,50 @@ export interface PartMatch {
   readonly mimeType?: string
   /** Which of several parts with the same filename and type, in document order. */
   readonly ordinal?: number
+}
+
+/** A MIME part declared a charset this runtime cannot decode. Dispatch reports it rather than guessing. */
+export class UnsupportedCharsetError extends Error {
+  readonly code = 'unsupported_charset'
+  constructor(readonly charset: string) {
+    super(`This message uses a character set Dispatch cannot read: ${charset}.`)
+  }
+}
+
+/** The charset a Content-Type declares, lowercased; empty when it declares none. */
+export function mimeCharset(contentType: string): string {
+  return parameter(contentType, 'charset').trim().toLowerCase()
+}
+
+/** Charsets whose text the Gmail connector returns intact. */
+export function isUnicodeCharset(charset: string): boolean {
+  return ['', 'utf-8', 'utf8', 'us-ascii', 'ascii'].includes(charset.trim().toLowerCase())
+}
+
+/** Bytes in a named charset, decoded with the WHATWG decoders. US-ASCII when no charset is named (RFC 2045). */
+export function decodeCharset(bytes: Uint8Array, charset: string): string {
+  const label = charset.trim().toLowerCase() || 'us-ascii'
+  let decoder: TextDecoder
+  try { decoder = new TextDecoder(label) } catch { throw new UnsupportedCharsetError(label) }
+  // WHATWG maps a few legacy labels (ISO-2022-KR, HZ) to a decoder that only emits U+FFFD.
+  if (decoder.encoding === 'replacement') throw new UnsupportedCharsetError(label)
+  return decoder.decode(bytes)
+}
+
+/** A text part's content, decoded with the charset its Content-Type declares. */
+export function decodeText(part: MimePart): string {
+  return decodeCharset(part.body, mimeCharset(part.headers.get('content-type') ?? ''))
+}
+
+/** The part at a Gmail part id: '' is the message itself, '1' its second part, '0.1' the second part of the first. */
+export function partAt(root: MimePart, partId: string): MimePart | undefined {
+  if (!partId) return root
+  let part: MimePart | undefined = root
+  for (const step of partId.split('.')) {
+    if (!/^\d+$/.test(step)) return undefined
+    part = part?.children[Number(step)]
+  }
+  return part
 }
 
 export function decodeRawMessage(raw: string): Buffer {
@@ -132,17 +176,23 @@ function parameter(headerValue: string, name: string): string {
   const match = pattern.exec(headerValue)
   if (!match) return ''
   const value = (match[2] ?? match[3] ?? '').trim()
-  const extended = /^[\w-]*'[\w-]*'(.*)$/.exec(value)
-  return extended ? safeDecodeURIComponent(extended[1]!) : value
+  const extended = /^([\w-]*)'[\w-]*'(.*)$/.exec(value)
+  return extended ? decodeCharset(percentBytes(extended[2]!), extended[1] || 'us-ascii') : value
+}
+
+/** RFC 2231 value bytes: %XX escapes, everything else as ASCII. */
+function percentBytes(value: string): Buffer {
+  const bytes: number[] = []
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === '%' && /^[0-9A-Fa-f]{2}$/.test(value.slice(i + 1, i + 3))) { bytes.push(parseInt(value.slice(i + 1, i + 3), 16)); i += 2 }
+    else bytes.push(value.charCodeAt(i) & 0xff)
+  }
+  return Buffer.from(bytes)
 }
 
 function decodeEncodedWord(value: string): string {
-  return value.replaceAll(/=\?([^?]+)\?([bBqQ])\?([^?]*)\?=/g, (_, _charset: string, kind: string, data: string) => {
-    if (kind.toLowerCase() === 'b') return Buffer.from(data, 'base64').toString('utf8')
-    return decodeQuotedPrintable(data.replaceAll('_', ' ')).toString('utf8')
+  return value.replaceAll(/=\?([^?]+)\?([bBqQ])\?([^?]*)\?=/g, (_, charset: string, kind: string, data: string) => {
+    const bytes = kind.toLowerCase() === 'b' ? Buffer.from(data, 'base64') : decodeQuotedPrintable(data.replaceAll('_', ' '))
+    return decodeCharset(bytes, charset.split('*')[0]!)
   })
-}
-
-function safeDecodeURIComponent(value: string): string {
-  try { return decodeURIComponent(value) } catch { return value }
 }

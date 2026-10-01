@@ -24,8 +24,10 @@ describe('resolveShortcut', () => {
     expect(resolveShortcut(press('x'), true)).toBeUndefined()
   })
 
-  it('ignores modifier combinations except Cmd-Enter', () => {
+  it('ignores modifier combinations except Cmd-Enter and Cmd-O', () => {
     expect(resolveShortcut(press('e', { metaKey: true }), false)).toBeUndefined()
+    expect(resolveShortcut(press('o', { metaKey: true }), false)).toEqual({ command: 'openWindow' })
+    expect(resolveShortcut(press('o', { metaKey: true, shiftKey: true }), false)).toBeUndefined()
     expect(resolveShortcut(press('e', { altKey: true }), false)).toBeUndefined()
     expect(resolveShortcut(press('Enter', { metaKey: true }), false)).toEqual({ command: 'ask' })
     expect(resolveShortcut(press('x'), false)).toBeUndefined()

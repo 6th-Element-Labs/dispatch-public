@@ -2,7 +2,7 @@ import type { GmailMailbox } from './contracts.js'
 
 export type ShortcutCommand =
   | 'reply' | 'replyAll' | 'forward' | 'archive' | 'spam' | 'trash' | 'toggleRead'
-  | 'next' | 'previous' | 'compose' | 'help' | 'ask'
+  | 'next' | 'previous' | 'compose' | 'help' | 'ask' | 'openWindow'
   | { readonly goto: GmailMailbox }
 
 export interface ShortcutKey {
@@ -17,6 +17,7 @@ export const SHORTCUT_GROUPS: ReadonlyArray<{ readonly title: string; readonly i
     { label: 'Reply', keys: 'R' }, { label: 'Reply all', keys: 'A' }, { label: 'Forward', keys: 'F' },
     { label: 'Archive', keys: 'E' }, { label: 'Mark as spam', keys: '!' }, { label: 'Move to Trash', keys: '⌫ or #' },
     { label: 'Mark read or unread', keys: 'U' }, { label: 'Undo last move', keys: '⌘Z' }, { label: 'Ask Codex', keys: '⌘⏎' },
+    { label: 'Open in new window', keys: '⌘O' },
   ] },
   { title: 'Navigate', items: [
     { label: 'Next / previous conversation', keys: 'J / K' }, { label: 'Extend selection', keys: '⇧↑ / ⇧↓' },
@@ -41,6 +42,7 @@ export function resolveShortcut(event: Pick<KeyboardEvent, 'key' | 'metaKey' | '
   if (event.altKey) return undefined
   if (modifier) {
     if (event.key === 'Enter' && !event.shiftKey) return { command: 'ask' }
+    if (event.key.toLowerCase() === 'o' && !event.shiftKey) return { command: 'openWindow' }
     return undefined
   }
   const key = event.key

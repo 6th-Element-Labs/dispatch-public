@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-open-message-window"
+description = "Let the mail list open one conversation in its own window."
+commands.allow = ["open_message_window"]

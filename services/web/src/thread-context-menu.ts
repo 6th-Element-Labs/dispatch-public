@@ -11,6 +11,7 @@ export type ThreadContextCommand =
   | 'spam'
   | 'trash'
   | 'ask'
+  | 'openWindow'
 
 export type ContextMenuItem =
   | { readonly kind: 'separator' }
@@ -21,9 +22,12 @@ export function threadContextMenuItems(input: {
   readonly unread: boolean
   readonly hasAccountId: boolean
   readonly count?: number
+  /** Offer Open in New Window for a single conversation or draft, from the main window. */
+  readonly openWindow?: boolean
 }): ContextMenuItem[] {
   const writes = input.hasAccountId
   const items: ContextMenuItem[] = (input.count ?? 1) > 1 ? [] : [
+    ...(input.openWindow ? [command('openWindow', 'Open in New Window', true), { kind: 'separator' } as const] : []),
     command('reply', 'Reply', true),
     command('replyAll', 'Reply All', true),
     command('forward', 'Forward', writes),

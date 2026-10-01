@@ -1,4 +1,4 @@
-import type { SendReceipt, OfflineStatus, AppSummary, ConversationProjection, DispatchModelCatalog, ConversationSummary, DraftProjection, GmailAccount, GmailConversationAction, GmailMailbox, GmailSyncStatus, MailAddress, MailStateFilter, MessageProjection, MessageSummary, MailboxCounts } from './contracts.js'
+import type { ExecutionPreferences, SendReceipt, OfflineStatus, AppSummary, ConversationProjection, DispatchModelCatalog, ConversationSummary, DraftProjection, GmailAccount, GmailConversationAction, GmailMailbox, GmailSyncStatus, MailAddress, MailStateFilter, MessageProjection, MessageSummary, MailboxCounts } from './contracts.js'
 
 declare const __DISPATCH_LOCAL_PROXY__: boolean
 const MAIL = __DISPATCH_LOCAL_PROXY__ ? `${location.origin}/mail` : 'http://127.0.0.1:8411'
@@ -29,7 +29,26 @@ function draftFields(fields: Record<string, unknown>): Record<string, unknown> {
   return { ...fields, bodyMarkdown, bodyText: bodyMarkdown }
 }
 
+function durableDraftFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const { bodyText, ...command } = fields
+  if (typeof command.bodyMarkdown !== 'string' && typeof bodyText === 'string') command.bodyMarkdown = bodyText
+  return command
+}
+
 export const api = {
+  async directSyncStatus(): Promise<import('./contracts.js').GmailDirectSyncStatus> {
+    const result = await request<{ directSync: import('./contracts.js').GmailDirectSyncStatus }>(`${MAIL}/v1/gmail-sync`)
+    return result.directSync
+  },
+  async connectDirectSync(accountId: string): Promise<{ authUrl: string } | { connected: true }> {
+    return request(`${MAIL}/v1/gmail-sync`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ accountId }) })
+  },
+  async useConnectorSync(accountId: string): Promise<void> {
+    await request(`${MAIL}/v1/gmail-sync?account=${encodeURIComponent(accountId)}`, { method: 'DELETE' })
+  },
+  async reconnectAccount(): Promise<{ authUrl: string }> {
+    return request(`${AGENT}/v1/account/reconnect`, { method: 'POST' })
+  },
   async listAccounts(offline = false): Promise<GmailAccount[]> {
     const result = await request<{ accounts: GmailAccount[] }>(`${MAIL}/v1/accounts${offline ? '?offline=true' : ''}`)
     return result.accounts
@@ -107,15 +126,21 @@ export const api = {
     if (accountId) params.set('account', accountId)
     await request(`${MAIL}/v1/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}/cache?${params}`, { method: 'POST' })
   },
+  /** Checks this exact account/message/file identity without downloading bytes. */
+  async attachmentCacheStatus(messageId: string, attachmentId: string, accountId: string | undefined, filename: string): Promise<{ cached: boolean }> {
+    const params = new URLSearchParams({ filename })
+    if (accountId) params.set('account', accountId)
+    return request(`${MAIL}/v1/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}/status?${params}`)
+  },
   async openAttachment(messageId: string, attachmentId: string, accountId: string | undefined, filename: string, offline = false): Promise<void> {
     const params = new URLSearchParams({ filename })
     if (accountId) params.set('account', accountId)
     if (offline) params.set('offline', 'true')
     await request(`${MAIL}/v1/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}/open?${params}`, { method: 'POST' })
   },
-  async openLocalDraftAttachment(filename: string, contentBase64: string): Promise<void> {
+  async openLocalDraftAttachment(filename: string, contentBase64: string, accountId?: string): Promise<void> {
     await request(`${MAIL}/v1/drafts/attachments/open`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ filename, contentBase64 }),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ filename, contentBase64, ...(accountId ? { accountId } : {}) }),
     })
   },
   async createDraft(messageId: string, fields: Record<string, unknown> = {}): Promise<DraftProjection> {
@@ -126,6 +151,18 @@ export const api = {
   },
   async updateDraft(id: string, fields: Record<string, unknown>): Promise<DraftProjection> {
     const result = await request<{ draft: DraftProjection }>(`${MAIL}/v1/drafts/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(draftFields(fields)) })
+    return result.draft
+  },
+  async saveDraft(fields: Record<string, unknown>): Promise<DraftProjection> {
+    const result = await request<{ draft: DraftProjection }>(`${MAIL}/v1/draft-saves`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(durableDraftFields(fields)),
+    })
+    return result.draft
+  },
+  async resolveDraftConflict(id: string, accountId: string, choice: 'keep-local' | 'use-remote', expectedRevision: number): Promise<DraftProjection> {
+    const result = await request<{ draft: DraftProjection }>(`${MAIL}/v1/draft-saves/${encodeURIComponent(id)}/conflict`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ accountId, choice, expectedRevision }),
+    })
     return result.draft
   },
   async previewDraft(bodyMarkdown: string): Promise<string> {
@@ -196,6 +233,16 @@ export const api = {
     return new EventSource(`${AGENT}/v1/events?threadId=${encodeURIComponent(threadId)}`)
   },
   activity(): EventSource { return new EventSource(`${AGENT}/v1/activity`) },
+  async executionPreferences(): Promise<ExecutionPreferences> {
+    const result = await request<{ preferences: ExecutionPreferences }>(`${AGENT}/v1/execution-preferences`)
+    return result.preferences
+  },
+  async saveExecutionPreferences(mode: ExecutionPreferences['mode']): Promise<ExecutionPreferences> {
+    const result = await request<{ preferences: ExecutionPreferences }>(`${AGENT}/v1/execution-preferences`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ version: 1, mode }),
+    })
+    return result.preferences
+  },
   async respondToServerRequest(id: number | string, result: unknown): Promise<void> {
     await request(`${AGENT}/v1/server-requests/respond`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, result }),

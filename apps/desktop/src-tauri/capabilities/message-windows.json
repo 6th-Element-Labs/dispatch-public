@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "message-windows",
+  "description": "A message window renders one conversation with the same web client. It may drag, zoom and close its own window, open web links, show context menus and mirror the appearance. It cannot set the Dock badge or open further message windows.",
+  "windows": [
+    "message-*"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "allow-popup-context-menu",
+    "allow-open-web-link",
+    "allow-set-appearance"
+  ]
+}

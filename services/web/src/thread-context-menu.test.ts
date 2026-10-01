@@ -58,6 +58,15 @@ describe('threadContextMenuItems', () => {
     })
   })
 
+  it('offers Open in New Window first, only for one conversation when asked', () => {
+    const items = threadContextMenuItems({ mailbox: 'inbox', unread: false, hasAccountId: true, openWindow: true })
+    expect(ids(items).slice(0, 2)).toEqual(['openWindow', 'reply'])
+    expect(items[0]).toEqual({ kind: 'command', id: 'openWindow', label: 'Open in New Window', enabled: true })
+    expect(items[1]).toEqual({ kind: 'separator' })
+    expect(ids(threadContextMenuItems({ mailbox: 'inbox', unread: false, hasAccountId: true }))).not.toContain('openWindow')
+    expect(ids(threadContextMenuItems({ mailbox: 'inbox', unread: false, hasAccountId: true, count: 2, openWindow: true }))).not.toContain('openWindow')
+  })
+
   it('offers only folder actions for a multi-selection', () => {
     expect(ids(threadContextMenuItems({ mailbox: 'inbox', unread: false, hasAccountId: true, count: 3 }))).toEqual(['archive', 'spam', 'trash'])
     expect(ids(threadContextMenuItems({ mailbox: 'trash', unread: false, hasAccountId: true, count: 2 }))).toEqual(['inbox'])

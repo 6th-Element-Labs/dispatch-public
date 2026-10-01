@@ -13,7 +13,9 @@ pub struct Resolution {
     pub searched: Vec<PathBuf>,
 }
 
-const DESKTOP_BUNDLES: [&str; 2] = [
+const DESKTOP_BUNDLES: [&str; 4] = [
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
     "/Applications/Codex.app/Contents/Resources/codex",
     "/Applications/ChatGPT.app/Contents/Resources/codex",
 ];
@@ -26,7 +28,7 @@ pub fn candidates(overridden: Option<&str>, path_var: Option<&str>, home: &Path)
     if let Some(value) = overridden.map(str::trim).filter(|value| !value.is_empty()) {
         list.push(PathBuf::from(value));
     }
-    // Keep the embedded experience on the same runtime and catalog as Codex Desktop.
+    // Bootstrap with the desktop runtime; agent owns subsequent verified updates.
     list.extend(DESKTOP_BUNDLES.iter().map(PathBuf::from));
     for directory in path_var.unwrap_or("").split(':').filter(|d| !d.is_empty()) {
         list.push(Path::new(directory).join("codex"));
@@ -142,6 +144,8 @@ mod tests {
             vec![
                 PathBuf::from(DESKTOP_BUNDLES[0]),
                 PathBuf::from(DESKTOP_BUNDLES[1]),
+                PathBuf::from(DESKTOP_BUNDLES[2]),
+                PathBuf::from(DESKTOP_BUNDLES[3]),
                 PathBuf::from("/a/codex"),
                 PathBuf::from("/b/codex"),
                 PathBuf::from("/opt/homebrew/bin/codex"),

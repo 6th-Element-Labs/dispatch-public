@@ -6,20 +6,75 @@
   "properties": {
     "turn": {
       "type": "object",
-      "required": ["text"],
+      "required": [
+        "text"
+      ],
       "properties": {
-        "text": {"type": "string", "minLength": 1},
-        "appId": {"type": "string"},
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "appId": {
+          "type": "string"
+        },
         "mailContext": {
           "type": "object",
-          "required": ["messageId", "threadId", "subject", "sender"],
+          "required": [
+            "messageId",
+            "threadId",
+            "subject",
+            "sender"
+          ],
           "properties": {
-            "messageId": {"type": "string"},
-            "threadId": {"type": "string"},
-            "subject": {"type": "string"},
-            "sender": {"type": "string"}
+            "messageId": {
+              "type": "string"
+            },
+            "threadId": {
+              "type": "string"
+            },
+            "subject": {
+              "type": "string"
+            },
+            "sender": {
+              "type": "string"
+            }
           },
           "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "accountReconnect": {
+      "type": "object",
+      "required": [
+        "authUrl"
+      ],
+      "properties": {
+        "authUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "loginId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "executionPreferences": {
+      "type": "object",
+      "required": [
+        "version",
+        "mode"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "mode": {
+          "enum": [
+            "full-access",
+            "workspace"
+          ]
         }
       },
       "additionalProperties": false
@@ -27,4 +82,3 @@
   },
   "additionalProperties": false
 }
-
