@@ -44,7 +44,17 @@ async function readHistoryFromMetadata(runtime: Runtime, threadId: string, metad
   const cursors = new Set<string>()
   let cursor: string | null = null
   for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
-    const page = await runtime.request('thread/turns/list', { threadId, cursor, limit: 100, sortDirection: 'asc', itemsView: 'full' }) as any
+    let page: any
+    try { page = await runtime.request('thread/turns/list', { threadId, cursor, limit: 100, sortDirection: 'asc', itemsView: 'full' }) }
+    catch (error) {
+      // Codex exposes metadata before an opened chat has its first user message.
+      // Only this exact first-page response proves that there are no saved turns.
+      if (pageNumber === 0 && error instanceof Error
+        && error.message === `thread ${threadId} is not materialized yet; thread/turns/list is unavailable before first user message`) {
+        return { ...metadata, thread: { ...metadata.thread, turns: [] } }
+      }
+      throw error
+    }
     if (!Array.isArray(page.data) || page.data.some((turn: any) => !Array.isArray(turn.items) || turn.itemsView === 'summary')) {
       throw new Error('Codex returned incomplete chat history. Try again shortly.')
     }

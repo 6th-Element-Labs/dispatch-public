@@ -72,6 +72,9 @@ any history. Background review confirms missing history through App Server,
 retains any old citations as unavailable, and continues reviewing the email. It
 does not create a replacement chat. Transient reads, timeouts and writer conflicts
 still fail visibly and retry; they are never treated as missing history.
+When App Server explicitly reports that the first page is unavailable because
+the same chat has no first user message, review treats its turns as empty.
+That exception never applies after a saved page or to another chat identity.
 
 To-dos supports All, Mine, Waiting, Done, Snoozed and Dismissed, plus contact/topic
 views. Selecting a work item opens its actual current record, not an editable stale

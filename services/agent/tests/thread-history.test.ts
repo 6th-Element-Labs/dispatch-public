@@ -59,6 +59,30 @@ it('does not call existing paginated metadata missing when full history is unava
  expect(runtime.request).not.toHaveBeenCalledWith('thread/resume',expect.anything())
 });
 
+it('reads an opened chat with no first user message as empty without replacing it',async()=>{
+ const runtime={request:vi.fn(async(method:string):Promise<any>=>{
+   if(method==='thread/read')return {thread:{id:'empty',historyMode:'paginated'}}
+   throw new Error('thread empty is not materialized yet; thread/turns/list is unavailable before first user message')
+ })}
+ expect((await readWorkThreadHistory(runtime,'empty')).thread.turns).toEqual([])
+ expect(runtime.request.mock.calls.map(([method])=>method)).toEqual(['thread/read','thread/turns/list'])
+});
+
+it('rejects another chat’s empty response and an empty response after a saved page',async()=>{
+ const runtime={request:vi.fn(async(method:string):Promise<any>=>{
+   if(method==='thread/read')return {thread:{id:'saved',historyMode:'paginated'}}
+   throw new Error('thread other is not materialized yet; thread/turns/list is unavailable before first user message')
+ })}
+ await expect(readWorkThreadHistory(runtime,'saved')).rejects.toThrow('thread other')
+ let page=0
+ runtime.request.mockImplementation(async(method:string):Promise<any>=>{
+   if(method==='thread/read')return {thread:{id:'saved',historyMode:'paginated'}}
+   if(page++===0)return {data:[{id:'turn',items:[],itemsView:'full'}],nextCursor:'next'}
+   throw new Error('thread saved is not materialized yet; thread/turns/list is unavailable before first user message')
+ })
+ await expect(readWorkThreadHistory(runtime,'saved')).rejects.toThrow('thread saved')
+});
+
 it('does not report a partial or repeated page as complete history', async () => {
   const runtime = { request: vi.fn(async (method: string): Promise<any> => method === 'thread/read' ? { thread: { historyMode: 'paginated' } } : { data: [{ items: [], itemsView: 'full' }], nextCursor: 'same' }) }
   await expect(readThreadHistory(runtime, 'chat')).rejects.toThrow(/repeated/)
