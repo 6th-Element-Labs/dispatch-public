@@ -38,6 +38,36 @@ it('does not keep retrying conclusively missing contact history or block later m
  scanner.stop();store.close();
 });
 
+it('continues past mail moved to Trash during review without completing its human-owned task',async()=>{
+ const {store,scanner}=setup();
+ const gone={...source,kind:'email' as const,id:'gone-message',threadId:'gone'};
+ store.reconcile('a','gone',[gone],{items:[{existingId:null,kind:'task',title:'Protected earlier work',summary:'Keep this record.',topic:'Earlier',owner:'boss@example.com',status:'open',due:null,certainty:'explicit',contacts:['jacob@example.com'],evidence:[{sourceId:gone.id,quote:gone.text}]}]});
+ const old=store.all()[0]!;store.action(old.id,{revision:old.revision,status:'done'});
+ store.enqueue({key:'gone',accountId:'a',kind:'email',contextId:'gone',revision:'1',priority:3});
+ const mock=vi.mocked(fetch),original=mock.getMockImplementation()!;
+ mock.mockImplementation(async(input,init)=>{
+   if(String(input).startsWith('http://mail/')&&String(input).includes('thread=gone'))return Response.json({error:'work_sources_unavailable'},{status:410});
+   if(String(input).endsWith('/v1/work/briefing')){const payload=JSON.parse(String(init?.body));return Response.json({lead:[],entries:payload.items.map((i:any)=>({itemId:i.id,section:'waiting',text:i.summary}))});}
+   return original(input,init);
+ });
+ await scanner.scan();
+ expect(store.state()).toMatchObject({failures:0,error:null});
+ expect(store.coverage()).toMatchObject({failed:0,pending:0});
+ expect(store.get(old.id)).toMatchObject({status:'done',evidence:[{source:{unavailable:true}}]});
+ expect(store.all()).toHaveLength(2);
+ scanner.stop();store.close();
+});
+
+it('does not treat an extraction service failure as removed email evidence',async()=>{
+ const {store,scanner}=setup();
+ const mock=vi.mocked(fetch),original=mock.getMockImplementation()!;
+ mock.mockImplementation(async(input,init)=>String(input).endsWith('/v1/work/extract')?Response.json({error:'extraction_failure'},{status:410}):original(input,init));
+ await scanner.scan();
+ expect(store.state()).toMatchObject({failures:1,error:'extraction_failure'});
+ expect(store.coverage()).toMatchObject({failed:1,reviewed:0});
+ scanner.stop();store.close();
+});
+
 it('pause still cancels an in-flight mailbox read after the review timer is restarted', async () => {
  const store = new WorkStore(':memory:');
  let signal: AbortSignal | undefined, release!: (response: Response) => void;

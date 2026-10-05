@@ -304,7 +304,7 @@ export function createMailServer(
           text:searchableMessageText(m)}))
         if(JSON.stringify(sources).length>4000000)return writeJson(response,422,{error:'conversation_too_large',detail:'This conversation exceeds the 4 MB evidence limit. Its work remains unreviewed.'})
         return writeJson(response, 200, {sources,accountEmail})
-      } catch(error) { return writeJson(response, 502, {error:'work_sources_unavailable',detail:String(error)}) }
+      } catch(error) { return writeJson(response, (error as {code?:string}).code==='work_evidence_unavailable'?410:502, {error:'work_sources_unavailable',detail:String(error)}) }
     }
     if (request.method === 'GET' && url.pathname === '/v1/conversations') {
       const state = stateFilter(url.searchParams.get('state'))

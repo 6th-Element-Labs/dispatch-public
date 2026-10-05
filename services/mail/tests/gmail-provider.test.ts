@@ -142,19 +142,19 @@ function conversationMessage(id: string, threadId = 'thread-large') {
   }
 }
 
-async function startThreadConnector(options: { indexedIds: string[]; returnedIds: string[]; failedReadIds?: string[] }) {
+async function startThreadConnector(options: { indexedIds: string[]; returnedIds: string[]; failedReadIds?: string[]; labelsById?: Record<string,string[]> }) {
   const directory = mkdtempSync(join(tmpdir(), 'dispatch-thread-completeness-')); directories.push(directory)
   const indexPath = join(directory, 'gmail.sqlite')
   const index = new GmailIndex(indexPath)
   const account = { id: 'one', connectorId: 'gmail', name: 'Work', email: 'work@example.com' }
   index.replaceAccount('one', options.indexedIds.map((id) => ({
-    ...projectGmailSearchEmail({ id, thread_id: 'thread-large', from_: 'Ana <ana@example.com>', subject: `Subject ${id}`, snippet: `Preview ${id}`, labels: ['INBOX'], email_ts: '2026-09-30T12:00:00Z' }, account),
-    ...folderFlagsFromLabels(['INBOX']),
+    ...projectGmailSearchEmail({ id, thread_id: 'thread-large', from_: 'Ana <ana@example.com>', subject: `Subject ${id}`, snippet: `Preview ${id}`, labels: options.labelsById?.[id]??['INBOX'], email_ts: '2026-09-30T12:00:00Z' }, account),
+    ...folderFlagsFromLabels(options.labelsById?.[id]??['INBOX']),
   })), 'fixture', true)
   index.close()
   const readIds: string[] = []
   const failed = new Set(options.failedReadIds ?? [])
-  const byId = new Map(options.indexedIds.map(id => [id, conversationMessage(id)]))
+  const byId = new Map(options.indexedIds.map(id => [id, {...conversationMessage(id),label_ids:options.labelsById?.[id]??['INBOX']}]))
   const server = createServer(async (request, response) => {
     response.setHeader('content-type', 'application/json')
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk))
@@ -409,6 +409,25 @@ describe('GmailConnectorProvider', () => {
     const conversation = await fixture.provider.readConversation('one', 'thread-large')
     expect(fixture.readIds).toEqual([])
     expect(conversation.completeness).toMatchObject({ complete: true, knownCount: 2, loadedCount: 2 })
+    fixture.provider.stopBackgroundSync()
+  })
+
+  it.each([{labels:['SENT']}, {labels:[]}])('reviews eligible non-Inbox mail live and from its complete cache ($labels)', async ({labels}) => {
+    const fixture=await startThreadConnector({indexedIds:['eligible'],returnedIds:['eligible'],labelsById:{eligible:labels}})
+    expect((await fixture.provider.readWorkConversation('one','thread-large')).messages.map(m=>m.id)).toEqual(['eligible'])
+    expect((await fixture.provider.readWorkConversation('one','thread-large')).availability?.mode).toBe('downloaded')
+    fixture.provider.stopBackgroundSync()
+  })
+
+  it.each(['SPAM','TRASH','DRAFT'])('reports a thread containing only %s as unavailable work evidence',async label=>{
+    const fixture=await startThreadConnector({indexedIds:['excluded'],returnedIds:['excluded'],labelsById:{excluded:[label]}})
+    await expect(fixture.provider.readWorkConversation('one','thread-large')).rejects.toMatchObject({code:'work_evidence_unavailable'})
+    fixture.provider.stopBackgroundSync()
+  })
+
+  it('retains eligible replies when other messages in the thread are excluded',async()=>{
+    const fixture=await startThreadConnector({indexedIds:['sent','trash','spam','draft'],returnedIds:['sent','trash','spam','draft'],labelsById:{sent:['SENT'],trash:['TRASH'],spam:['SPAM'],draft:['DRAFT']}})
+    expect((await fixture.provider.readWorkConversation('one','thread-large')).messages.map(m=>m.id)).toEqual(['sent'])
     fixture.provider.stopBackgroundSync()
   })
 

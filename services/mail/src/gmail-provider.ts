@@ -1313,10 +1313,15 @@ export class GmailConnectorProvider {
   async readWorkConversation(accountId: string, threadId: string): Promise<ConversationProjection> {
     const cached=this.#local.conversation(accountId,threadId)
     const ids=this.#index?.threadMessageIds(accountId,threadId) ?? []
-    const conversation=await this.readConversation(accountId,threadId,Boolean(cached?.conversation.completeness?.complete && ids.length && ids.every(id=>cached.conversation.messages.some(m=>m.id===id))))
+    let conversation: ConversationProjection
+    try { conversation=await this.readConversation(accountId,threadId,Boolean(cached?.conversation.completeness?.complete && ids.length && ids.every(id=>cached.conversation.messages.some(m=>m.id===id)))) }
+    catch(error) {
+      if((error as {code?:string}).code==='conversation_not_in_mailbox')throw Object.assign(new Error('This thread has no eligible email evidence.'),{code:'work_evidence_unavailable'});
+      throw error;
+    }
     const excluded=new Set(this.#index?.excludedWorkMessageIds(accountId,threadId)??[])
     const messages=conversation.messages.filter(m=>!excluded.has(m.id));
-    if(!messages.length)throw new Error('This thread has no eligible email evidence.');
+    if(!messages.length)throw Object.assign(new Error('This thread has no eligible email evidence.'),{code:'work_evidence_unavailable'});
     return {...projectConversation(messages,'gmail'),completeness:conversation.completeness,availability:conversation.availability}
   }
 

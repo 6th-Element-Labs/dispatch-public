@@ -663,6 +663,14 @@ it('exports bounded work evidence from the exact account and refuses incomplete 
   complete=false;expect((await fetch(base+'/v1/work/sources?account=a&thread=t')).status).toBe(409)
 })
 
+it('distinguishes unavailable work evidence from a transient mail read failure',async()=>{
+  let unavailable=true
+  const base=await start({}, {readWorkConversation:async()=>{throw Object.assign(new Error(unavailable?'No eligible evidence.':'Read timed out.'),unavailable?{code:'work_evidence_unavailable'}:{})}})
+  expect((await fetch(base+'/v1/work/sources?account=a&thread=t')).status).toBe(410)
+  unavailable=false
+  expect((await fetch(base+'/v1/work/sources?account=a&thread=t')).status).toBe(502)
+})
+
 it('accepts an editor send snapshot immediately and exposes its background status without a provider send call', async () => {
   const draft = projectDraft({ id: 'queued-snapshot', accountId: 'one', inReplyToMessageId: 'm1', to: [], subject: 'Reply', bodyMarkdown: 'Current text' })
   const receipt = { id: 'attempt', accountId: 'one', accountLabel: 'work@example.com', draftId: draft.id, requestedAt: new Date().toISOString(), status: 'preparing' as const, detailsSource: 'unavailable' as const }

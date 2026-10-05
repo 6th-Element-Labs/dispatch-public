@@ -66,6 +66,9 @@ review. Renaming alone still allows supported completion. Revision checks preven
 stale writes; Undo restores the prior action. A source trail records changes and
 exact evidence. Removed message evidence is retained and marked unavailable without
 erasing work or implying completion.
+If every message becomes excluded (Spam, Trash or Drafts) while a review is
+queued, Mail reports unavailable evidence. Work retains citations and human
+status, finishes only that source revision, and continues reviewing other mail.
 
 An opened Codex chat can retain its Dispatch binding before Codex has persisted
 any history. Background review confirms missing history through App Server,

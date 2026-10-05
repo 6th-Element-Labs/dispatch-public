@@ -69,6 +69,7 @@ export class WorkScanner {
                 this.store.finishJob(job);this.store.setState({scanned:this.store.state().scanned+1});
             }catch(error){
                 if(signal.aborted){this.store.finishJob(job,undefined,true);break;}
+                if(job.kind==='email'&&(error as {code?:string}).code==='email_evidence_unavailable'){this.store.sourceAvailability(job.accountId,job.contextId,[]);this.store.finishJob(job);this.store.setState({scanned:this.store.state().scanned+1});continue;}
                 if(job.kind==='codex'&&(error as {status?:number}).status===410){this.store.markDiscussionUnavailable(job.accountId,job.contextId);this.store.finishJob(job);this.store.setState({scanned:this.store.state().scanned+1});continue;}
                 if((error as {status?:number}).status===429){this.store.deferJob(job);break;}
                 this.store.finishJob(job,error);this.store.setState({failures:this.store.state().failures+1,error:error instanceof Error?error.message:String(error)});
@@ -87,7 +88,10 @@ export class WorkScanner {
         this.#queue=task;this.#analyses.set(key,task);return task;
     }
     async #analyze(accountId:string,threadId:string,signal:AbortSignal){
-        const params=new URLSearchParams({account:accountId,thread:threadId}),mail=await getJson(this.mailBase,`/v1/work/sources?${params}`,{},signal);
+        const params=new URLSearchParams({account:accountId,thread:threadId});
+        let mail:{sources:Source[];accountEmail:string};
+        try{mail=await getJson(this.mailBase,`/v1/work/sources?${params}`,{},signal);}
+        catch(error){if(error instanceof Error&&(error as {status?:number}).status===410)throw Object.assign(error,{code:'email_evidence_unavailable'});throw error;}
         this.store.sourceAvailability(accountId,threadId,mail.sources);
         const addresses=new Set<string>(mail.sources.flatMap((s:Source)=>s.participants).filter((e:string)=>e!==mail.accountEmail));
         const related=this.store.all(accountId).filter(i=>i.contacts.some(c=>addresses.has(c)));
