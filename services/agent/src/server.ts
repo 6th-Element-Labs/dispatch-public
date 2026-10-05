@@ -1,6 +1,6 @@
 import { WorkEvidenceFeed } from './work-evidence-feed.js'
 import { extractWork, composeBriefing, discussionSources } from './work-extraction.js'
-import { readThreadHistory } from './thread-history.js'
+import { readThreadHistory, readWorkThreadHistory } from './thread-history.js'
 import { watchParent } from './parent-watch.js'
 import { TaskActivity } from './task-activity.js'
 import { parseExecutionPreferences, readExecutionPreferences, saveExecutionPreferences, threadExecutionParams, turnExecutionParams } from './execution-preferences.js'
@@ -648,7 +648,7 @@ export function createAgentServer(runtime: AgentRuntime, options: { bindings?: C
       try{await evidencePublish;await flushEvidence();for(const binding of bindings.workBindings())feed().publish(binding,evidenceBaseline);return json(response,200,feed().page(cursor))}catch(error){return json(response,409,{error:'discussion_feed_failed',detail:errorMessage(error)})}
     }
     if(request.method==='GET' && url.pathname==='/v1/work/discussions'){
-      try{await bindings.load();const binding=bindings.workBindings().find(b=>b.accountId===url.searchParams.get('account')&&b.codexThreadId===url.searchParams.get('chat'));if(!binding)return json(response,404,{error:'bound_discussion_not_found'});const history=await readThreadHistory(runtime,binding.codexThreadId);return json(response,200,{binding,sources:discussionSources(history,binding.accountId,binding.kind==='conversation'?binding.contextId:`${binding.kind}:${binding.contextId}`,binding.codexThreadId)})}catch(error){return json(response,502,{error:'discussion_unavailable',detail:errorMessage(error)})}
+      try{await bindings.load();const binding=bindings.workBindings().find(b=>b.accountId===url.searchParams.get('account')&&b.codexThreadId===url.searchParams.get('chat'));if(!binding)return json(response,404,{error:'bound_discussion_not_found'});const history=await readWorkThreadHistory(runtime,binding.codexThreadId);if(!history)return json(response,410,{error:'discussion_history_missing',binding,detail:'This bound chat has no stored Codex history.'});return json(response,200,{binding,sources:discussionSources(history,binding.accountId,binding.kind==='conversation'?binding.contextId:`${binding.kind}:${binding.contextId}`,binding.codexThreadId)})}catch(error){return json(response,502,{error:'discussion_unavailable',detail:errorMessage(error)})}
     }
     if (request.method === 'GET' && url.pathname === '/v1/work/sources') {
       const accountId=url.searchParams.get('account'), gmailThreadId=url.searchParams.get('thread')
@@ -662,9 +662,9 @@ export function createAgentServer(runtime: AgentRuntime, options: { bindings?: C
           if(!Array.isArray(contexts)||contexts.length>30||contexts.some(id=>typeof id!=='string'||id.length>300))return json(response,400,{error:'invalid_contexts'})
           for(const contextId of contexts){const id=bindings.get({kind,accountId,contextId});if(id)ids.add(id)}
         }
-        const sources=[]
-        for(const id of ids){const history=await readThreadHistory(runtime,id);sources.push(...discussionSources(history,accountId,gmailThreadId,id))}
-        return json(response,200,{sources})
+        const sources=[],unavailableChats=[]
+        for(const id of ids){const history=await readWorkThreadHistory(runtime,id);if(!history){unavailableChats.push(id);continue;}sources.push(...discussionSources(history,accountId,gmailThreadId,id))}
+        return json(response,200,{sources,unavailableChats})
       }catch(error){return json(response,502,{error:'discussion_unavailable',detail:errorMessage(error)})}
     }
     if (request.method === 'POST' && url.pathname === '/v1/threads/bindings') {

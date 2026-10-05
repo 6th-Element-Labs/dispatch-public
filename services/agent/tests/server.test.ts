@@ -935,3 +935,12 @@ it('defers background analysis while an interactive Codex chat is working',async
 it('publishes completed bound Codex discussions through the durable evidence feed only once',async()=>{
  const {base,fake,bindings}=await startWithBindings();await bindings.put({kind:'contact',accountId:'account',contextId:'jacob@example.com'},'chat');const receive=fake.subscribe.mock.calls[0]![0];const complete={method:'turn/completed',params:{threadId:'chat',turn:{id:'turn',status:'completed'}}};receive(complete);receive(complete);const page=await (await fetch(`${base}/v1/work/changes?cursor=0`)).json();expect(page.events.filter((e:any)=>e.turnId==='turn')).toHaveLength(1);expect(page.events).toEqual(expect.arrayContaining([expect.objectContaining({accountId:'account',contextId:'jacob@example.com'})]));expect((await fetch(`${base}/v1/work/discussions?account=other&chat=chat`)).status).toBe(404);
 });
+
+it('projects conclusively absent chat history without replacing bindings or hiding temporary failures',async()=>{
+ const {base,fake,bindings}=await startWithBindings();const key={kind:'conversation',accountId:'account',gmailThreadId:'mail'} as const;await bindings.put(key,'empty');
+ fake.request.mockImplementation(async(method:string)=>{throw new Error(method==='thread/resume'?'no rollout found for thread id empty':'thread not loaded: empty')});
+ const response=await fetch(`${base}/v1/work/sources?account=account&thread=mail`);expect(response.status).toBe(200);expect(await response.json()).toEqual({sources:[],unavailableChats:['empty']});expect(bindings.get(key)).toBe('empty');
+ await bindings.put({kind:'contact',accountId:'account',contextId:'jacob@example.com'},'empty');expect((await fetch(`${base}/v1/work/discussions?account=account&chat=empty`)).status).toBe(410);
+ fake.request.mockImplementation(async()=>{throw new Error('request timed out')});const retry=await fetch(`${base}/v1/work/sources?account=account&thread=mail`);expect(retry.status).toBe(502);expect(await retry.json()).toMatchObject({error:'discussion_unavailable',detail:'request timed out'});expect(bindings.get(key)).toBe('empty');
+ expect(fake.request).not.toHaveBeenCalledWith('thread/start',expect.anything());
+});

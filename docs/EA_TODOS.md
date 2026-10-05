@@ -67,6 +67,12 @@ stale writes; Undo restores the prior action. A source trail records changes and
 exact evidence. Removed message evidence is retained and marked unavailable without
 erasing work or implying completion.
 
+An opened Codex chat can retain its Dispatch binding before Codex has persisted
+any history. Background review confirms missing history through App Server,
+retains any old citations as unavailable, and continues reviewing the email. It
+does not create a replacement chat. Transient reads, timeouts and writer conflicts
+still fail visibly and retry; they are never treated as missing history.
+
 To-dos supports All, Mine, Waiting, Done, Snoozed and Dismissed, plus contact/topic
 views. Selecting a work item opens its actual current record, not an editable stale
 briefing snapshot. Source links open email, completed Codex history or a transcript

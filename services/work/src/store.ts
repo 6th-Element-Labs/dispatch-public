@@ -72,6 +72,12 @@ export class WorkStore {
     }
     deferJob(job:WorkJob){this.#db.prepare("UPDATE jobs SET status='pending',available_at=? WHERE key=? AND revision=?").run(new Date(Date.now()+30000).toISOString(),job.key,job.revision);}
     retryJobs(){this.#db.prepare("UPDATE jobs SET available_at=? WHERE status='failed'").run(new Date().toISOString());}
+    markDiscussionUnavailable(accountId:string,chatId:string){
+        for(const item of this.all(accountId)){
+            if(!item.evidence.some(e=>e.source.kind==='codex'&&e.source.codexThreadId===chatId&&!e.source.unavailable))continue;
+            this.#put({...item,revision:item.revision+1,updatedAt:new Date().toISOString(),evidence:item.evidence.map(e=>e.source.kind==='codex'&&e.source.codexThreadId===chatId?{...e,source:{...e.source,unavailable:true}}:e)},undefined,'Codex source has no stored history');
+        }
+    }
     markUnavailable(accountId:string,threadId:string){
         this.#db.prepare("UPDATE jobs SET status='done',error=NULL WHERE account_id=? AND kind='email' AND context_id=?").run(accountId,threadId);
         for(const item of this.all(accountId)){

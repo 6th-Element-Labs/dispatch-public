@@ -69,6 +69,7 @@ export class WorkScanner {
                 this.store.finishJob(job);this.store.setState({scanned:this.store.state().scanned+1});
             }catch(error){
                 if(signal.aborted){this.store.finishJob(job,undefined,true);break;}
+                if(job.kind==='codex'&&(error as {status?:number}).status===410){this.store.markDiscussionUnavailable(job.accountId,job.contextId);this.store.finishJob(job);this.store.setState({scanned:this.store.state().scanned+1});continue;}
                 if((error as {status?:number}).status===429){this.store.deferJob(job);break;}
                 this.store.finishJob(job,error);this.store.setState({failures:this.store.state().failures+1,error:error instanceof Error?error.message:String(error)});
                 if([401,403,502,503].includes((error as {status?:number}).status??0))break;
@@ -92,6 +93,7 @@ export class WorkScanner {
         const related=this.store.all(accountId).filter(i=>i.contacts.some(c=>addresses.has(c)));
         params.set('contacts',JSON.stringify([...addresses].slice(0,30)));params.set('topics',JSON.stringify([...new Set(related.map(i=>i.topicId))].slice(0,30)));
         const chat=await getJson(this.agentBase,`/v1/work/sources?${params}`,{},signal);
+        for(const id of chat.unavailableChats??[])this.store.markDiscussionUnavailable(accountId,id);
         await this.#analyzeSources(accountId,JSON.stringify([accountId,threadId]),[...mail.sources,...chat.sources.map((s:Source)=>({...s,accountEmail:mail.accountEmail,participants:[...new Set(mail.sources.flatMap((m:Source)=>m.participants))]}))],signal);
     }
     async #analyzeSources(accountId:string,scanKey:string,raw:Source[],signal:AbortSignal){

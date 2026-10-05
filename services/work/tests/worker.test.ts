@@ -9,6 +9,35 @@ function setup(fail = false) { const store = new WorkStore(':memory:'); let extr
 it('persists scan failures and retries without replacing existing work', async () => { const { store, scanner } = setup(true); await scanner.scan(); expect(store.state()).toMatchObject({ running: false, enabled: true, scanned: 0, failures: 1 }); expect(store.state().error).toMatch(/unavailable/); expect(store.all()).toEqual([]); scanner.stop(); store.close(); });
 it('coalesces repeated review of one thread and skips unchanged evidence', async () => { const { store, scanner, extracts } = setup(); await Promise.all([scanner.analyze('a', 't'), scanner.analyze('a', 't')]); expect(extracts()).toBe(1); await scanner.analyze('a', 't'); expect(extracts()).toBe(1); expect(store.all()).toHaveLength(1); scanner.stop(); store.close(); });
 
+it('continues email review while retaining unavailable chat citations and human completion',async()=>{
+ const {store,scanner}=setup();
+ const chat={...source,id:'chat-source',kind:'codex' as const,codexThreadId:'empty',turnId:'turn',messageId:''};
+ store.reconcile('a','seed',[chat],{items:[{existingId:null,kind:'task',title:'Earlier task',summary:'Keep history.',topic:'Earlier',owner:'boss@example.com',status:'open',due:null,certainty:'explicit',contacts:['jacob@example.com'],evidence:[{sourceId:chat.id,quote:chat.text}]}]});
+ const old=store.all()[0]!;store.action(old.id,{revision:old.revision,status:'done'});
+ const mock=vi.mocked(fetch),original=mock.getMockImplementation()!;
+ mock.mockImplementation(async(input,init)=>String(input).startsWith('http://agent/')&&String(input).includes('sources')?Response.json({sources:[],unavailableChats:['empty']}):original(input,init));
+ await scanner.analyze('a','t');
+ expect(store.all()).toHaveLength(2);
+ expect(store.get(old.id)).toMatchObject({status:'done',evidence:[{source:{unavailable:true}}]});
+ scanner.stop();store.close();
+});
+
+it('does not keep retrying conclusively missing contact history or block later mail',async()=>{
+ const {store,scanner}=setup();
+ store.enqueue({key:'empty-chat',accountId:'a',kind:'codex',contextId:'empty',revision:'1',priority:3});
+ const mock=vi.mocked(fetch),original=mock.getMockImplementation()!;
+ mock.mockImplementation(async(input,init)=>{
+   if(String(input).includes('/v1/work/discussions'))return Response.json({error:'discussion_history_missing'},{status:410});
+   if(String(input).endsWith('/v1/work/briefing')){const payload=JSON.parse(String(init?.body));return Response.json({lead:[],entries:payload.items.map((i:any)=>({itemId:i.id,section:'waiting',text:i.summary}))});}
+   return original(input,init);
+ });
+ await scanner.scan();
+ expect(store.state()).toMatchObject({failures:0,error:null});
+ expect(store.coverage()).toMatchObject({failed:0,pending:0});
+ expect(store.all()).toHaveLength(1);
+ scanner.stop();store.close();
+});
+
 it('pause still cancels an in-flight mailbox read after the review timer is restarted', async () => {
  const store = new WorkStore(':memory:');
  let signal: AbortSignal | undefined, release!: (response: Response) => void;
