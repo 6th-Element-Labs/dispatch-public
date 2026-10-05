@@ -8,6 +8,7 @@ import type { DraftSaveJob } from './draft-save-queue.js'
 
 export interface ReceiptDetails { to: string[]; cc: string[]; bcc: string[]; subject: string; attachments: { name: string; mediaType: string; sizeLabel?: string }[] }
 export interface SendReceipt {
+  background?: boolean
   id: string; accountId: string; accountLabel: string; draftId?: string; messageId?: string
   status: 'preparing' | 'sending' | 'accepted' | 'verified' | 'failed' | 'unknown'
   requestedAt: string; acceptedAt?: string; verifiedAt?: string; sentAt?: string

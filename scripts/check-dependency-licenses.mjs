@@ -12,6 +12,7 @@ const lockfiles = [
   'services/web/package-lock.json',
   'services/mail/package-lock.json',
   'services/agent/package-lock.json',
+  'services/work/package-lock.json',
   'apps/desktop/package-lock.json',
 ]
 

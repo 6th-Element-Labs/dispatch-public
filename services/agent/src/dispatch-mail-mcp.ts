@@ -15,6 +15,7 @@ export function dispatchMailConfig() {
     // Explicit per-tool approval also works in older chats with policy "never".
     tools: {
       create_draft: { approval_mode: 'approve' },
+      update_todo: { approval_mode: 'approve' },
       update_draft: { approval_mode: 'approve' },
       attach_files: { approval_mode: 'approve' },
       resolve_draft_conflict: { approval_mode: 'approve' },
@@ -47,6 +48,13 @@ export function createDispatchMailMcp(mailBase = `http://127.0.0.1:${process.env
   }
   const readonly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
   const write = { readOnlyHint: false, destructiveHint: false, openWorldHint: true }
+  const workBase=process.env.DISPATCH_WORK_BASE ?? 'http://127.0.0.1:8413'
+  async function work(path:string,body?:unknown){
+    const response=await fetch(workBase+path,{method:body===undefined?'GET':'POST',headers:{'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(5000)})
+    const value=await response.json() as Record<string,unknown>;if(!response.ok)throw new Error(String(value.detail??value.error));return value
+  }
+  server.registerTool('list_work',{description:'Read durable Dispatch to-dos and decisions across email and Codex discussions. Filter by exact accountId, contact email or topic ID. Sources and revisions are included.',inputSchema:{account:z.string().optional(),contact:z.string().email().optional(),topic:z.string().optional(),filter:z.enum(['all','waiting','done','snoozed','dismissed']).optional()},annotations:readonly},args=>result(()=>work('/v1/work?'+new URLSearchParams(Object.entries(args).filter((entry):entry is [string,string]=>typeof entry[1]==='string')))))
+  server.registerTool('update_todo',{description:'Update a saved Dispatch to-do when the user asks. Read list_work first and send its exact id and revision. Changes survive future scans. This does not send email.',inputSchema:{id:z.string().regex(/^[a-z0-9]+$/),revision:z.number().int().positive(),status:z.enum(['open','waiting','done','snoozed','dismissed']).optional(),snoozedUntil:z.string().datetime().nullable().optional(),title:z.string().min(1).max(180).optional(),owner:z.string().email().nullable().optional(),due:z.string().nullable().optional()},annotations:{readOnlyHint:false,destructiveHint:false,openWorldHint:false}},({id,...patch})=>result(()=>work('/v1/work/items/'+id,patch)))
   server.registerTool('list_accounts', { description: 'List the Gmail accounts connected to Dispatch. Use the exact accountId for draft actions.', inputSchema: {}, annotations: readonly }, () => result(() => request('/v1/accounts')))
   server.registerTool('show_search_results', {
     description: 'Display your email search findings as a selectable list in Dispatch. Search and read messages with Gmail tools first. Supply exact account/message IDs and a short verbatim plain-text body passage supporting each match (omit HTML tags; do not paraphrase); mail verifies the quotes. For unanswered questions, read the thread and assess replies rather than treating unread as unanswered. Keep relevance reasons concise. Use the requestId from the search request when supplied. Pass an empty matches array for no findings.',

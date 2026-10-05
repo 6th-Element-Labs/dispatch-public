@@ -5,19 +5,59 @@
       "name": "web",
       "port": 8410,
       "store": null,
-      "owns": ["static-client", "presentation-state", "unsaved-editor-recovery"]
+      "owns": [
+        "static-client",
+        "presentation-state",
+        "unsaved-editor-recovery"
+      ]
     },
     {
       "name": "mail",
       "port": 8411,
       "store": "gmail-index-sqlite",
-      "owns": ["gmail-sync-state", "gmail-message-index", "message-projections", "draft-state", "attachment-open-cache", "downloaded-conversations", "send-receipts", "mailbox-download-state"]
+      "owns": [
+        "gmail-sync-state",
+        "gmail-message-index",
+        "message-projections",
+        "draft-state",
+        "attachment-open-cache",
+        "downloaded-conversations",
+        "send-receipts",
+        "mailbox-download-state",
+        "durable-mail-evidence-feed"
+      ]
     },
     {
       "name": "agent",
       "port": 8412,
       "store": "codex-owned-session-store",
-      "owns": ["app-server-process", "agent-transport", "streamed-agent-events", "codex-execution-preferences"]
+      "owns": [
+        "app-server-process",
+        "agent-transport",
+        "streamed-agent-events",
+        "codex-execution-preferences",
+        "completed-discussion-evidence-journal",
+        "structured-work-inference"
+      ]
+    },
+    {
+      "name": "work",
+      "port": 8413,
+      "store": "work-sqlite",
+      "owns": [
+        "tasks",
+        "decisions",
+        "contact-and-topic-context",
+        "evidence-links",
+        "extraction-checkpoints",
+        "attention-ranking",
+        "topic-updates",
+        "durable-review-jobs",
+        "transcript-imports",
+        "work-change-history",
+        "saved-daily-briefings",
+        "briefing-and-review-settings"
+      ]
     }
   ],
   "requirements": {

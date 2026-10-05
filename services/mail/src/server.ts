@@ -1,5 +1,5 @@
 import { watchParent } from './parent-watch.js'
-import { projectSearchResults, type SearchMatch } from './search-results.js'
+import { projectSearchResults, searchableMessageText, type SearchMatch } from './search-results.js'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -39,7 +39,7 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
 }
 
-type GmailProvider = Pick<GmailConnectorProvider, 'accounts' | 'listMessages' | 'listUnifiedMessages' | 'readMessage' | 'listConversations' | 'listUnifiedConversations' | 'readConversation'> & Partial<Pick<GmailConnectorProvider, 'directSyncStatus' | 'connectDirectSync' | 'useConnectorSync' | 'startBackgroundSync' | 'stopBackgroundSync' | 'syncStatus' | 'syncNow' | 'refreshNow' | 'setConversationUnread' | 'searchConversations' | 'listMailboxConversations' | 'mailboxCounts' | 'listRecipients' | 'mutateConversation' | 'setRuntimeDraining' | 'enqueueDraftSave' | 'attachDraftFiles' | 'resolveDraftConflict' | 'conflictCopies' | 'createGmailDraft' | 'updateGmailDraft' | 'patchGmailDraft' | 'readGmailDraft' | 'openGmailDraft' | 'discardGmailDraft' | 'sendGmailDraft' | 'sendReceipts' | 'sendReceipt' | 'verifySendReceipt' | 'recordExternalSend' | 'cachedAccounts' | 'offlineStatus' | 'downloadedConversations' | 'startOfflineDownload' | 'cancelOfflineDownload' | 'readAttachment'>>
+type GmailProvider = Pick<GmailConnectorProvider, 'accounts' | 'listMessages' | 'listUnifiedMessages' | 'readMessage' | 'listConversations' | 'listUnifiedConversations' | 'readConversation'> & Partial<Pick<GmailConnectorProvider, 'workChanges' | 'readWorkConversation' | 'directSyncStatus' | 'connectDirectSync' | 'useConnectorSync' | 'startBackgroundSync' | 'stopBackgroundSync' | 'syncStatus' | 'syncNow' | 'refreshNow' | 'setConversationUnread' | 'searchConversations' | 'listMailboxConversations' | 'mailboxCounts' | 'listRecipients' | 'mutateConversation' | 'setRuntimeDraining' | 'enqueueDraftSave' | 'attachDraftFiles' | 'resolveDraftConflict' | 'conflictCopies' | 'createGmailDraft' | 'updateGmailDraft' | 'patchGmailDraft' | 'readGmailDraft' | 'openGmailDraft' | 'discardGmailDraft' | 'sendGmailDraft' | 'beginGmailDraftSend' | 'existingDraftSend' | 'backgroundSends' | 'failedSendDraft' | 'sendReceipts' | 'sendReceipt' | 'verifySendReceipt' | 'recordExternalSend' | 'cachedAccounts' | 'offlineStatus' | 'downloadedConversations' | 'startOfflineDownload' | 'cancelOfflineDownload' | 'readAttachment'>>
 
 function draftError(error: unknown, fallback: string): { error: string; detail: string } {
   const value = error as { code?: unknown; message?: unknown }
@@ -261,10 +261,50 @@ export function createMailServer(
         } catch (error) { return writeJson(response, 400, { error: 'receipt_record_failed', detail: String(error) }) }
       }
     }
+    if (request.method === 'GET' && url.pathname === '/v1/draft-sends') return writeJson(response, 200, { sends: gmail.backgroundSends?.() ?? [] })
+    const sendMatch = /^\/v1\/draft-sends\/([^/]+)$/.exec(url.pathname)
+    if (request.method === 'GET' && sendMatch?.[1]) {
+      const receipt = gmail.sendReceipt?.(decodeURIComponent(sendMatch[1]))
+      return receipt ? writeJson(response, 200, { receipt, draft: gmail.failedSendDraft?.(receipt.id) }) : writeJson(response, 404, { error: 'send_not_found' })
+    }
     const receiptMatch = /^\/v1\/send-receipts\/([^/]+)$/.exec(url.pathname)
     if (request.method === 'POST' && receiptMatch?.[1] && gmail.verifySendReceipt) {
       try { return writeJson(response, 200, { receipt: await gmail.verifySendReceipt(decodeURIComponent(receiptMatch[1])) }) }
       catch (error) { return writeJson(response, 404, { error: 'receipt_not_found', detail: String(error) }) }
+    }
+    if (request.method === 'GET' && url.pathname === '/v1/work/changes') {
+      const cursor=Number(url.searchParams.get('cursor')??0),limit=Number(url.searchParams.get('limit')??200),since=url.searchParams.get('since')??''
+      if(!Number.isSafeInteger(cursor)||cursor<0||!Number.isInteger(limit)||limit<1||limit>200||!Number.isFinite(Date.parse(since)))return writeJson(response,400,{error:'invalid_work_cursor'})
+      try {if(!gmail.workChanges)return writeJson(response,503,{error:'work_feed_unavailable'});return writeJson(response,200,gmail.workChanges(cursor,since,limit))}
+      catch(error){return writeJson(response,409,{error:'work_feed_failed',detail:String(error)})}
+    }
+    if (request.method === 'GET' && url.pathname === '/v1/work/candidates') {
+      try {
+        const limit = Number(url.searchParams.get('limit') ?? 30)
+        if (!Number.isInteger(limit) || limit < 1 || limit > 1000) return writeJson(response, 400, { error: 'invalid_limit' })
+        if (!gmail.listMailboxConversations) return writeJson(response, 503, { error: 'mail_index_unavailable' })
+        const candidates = []
+        for (const account of await gmail.accounts()) {
+          const rows = (await Promise.all((['inbox', 'sent', 'archive'] as const).map(folder => gmail.listMailboxConversations!(folder, 'all', account.id)))).flat()
+          // A thread can appear in several folders; retain its newest projection.
+          candidates.push(...[...new Map(rows.sort((a,b) => a.receivedAt.localeCompare(b.receivedAt)).map(row => [row.threadId, row])).values()].sort((a,b) => b.receivedAt.localeCompare(a.receivedAt)).slice(0,limit))
+        }
+        return writeJson(response, 200, { candidates })
+      } catch (error) { return writeJson(response, 502, { error: 'work_sources_unavailable', detail: String(error) }) }
+    }
+    if (request.method === 'GET' && url.pathname === '/v1/work/sources') {
+      const accountId=url.searchParams.get('account'), threadId=url.searchParams.get('thread')
+      if (!accountId || !threadId) return writeJson(response, 400, { error: 'account_and_thread_required' })
+      try {
+        const conversation=await (gmail.readWorkConversation?.(accountId,threadId) ?? gmail.readConversation(accountId,threadId))
+        const accountEmail=(gmail.cachedAccounts?.() ?? await gmail.accounts()).find(a=>a.id===accountId)?.email.toLowerCase()
+        if (conversation.completeness?.complete === false) return writeJson(response, 409, { error: 'incomplete_conversation', detail: 'Some messages are missing. Refresh the conversation before analyzing it.' })
+        const sources=conversation.messages.map(m=>({id:JSON.stringify([accountId,m.id]),kind:'email',accountId,accountEmail,threadId,messageId:m.id,title:m.subject,at:m.receivedAt,
+          author:m.sender.address,participants:[...new Set([m.sender.address,...(m.to??[]).map(a=>a.address),...(m.cc??[]).map(a=>a.address)])].map(a=>a.toLowerCase()),
+          text:searchableMessageText(m)}))
+        if(JSON.stringify(sources).length>4000000)return writeJson(response,422,{error:'conversation_too_large',detail:'This conversation exceeds the 4 MB evidence limit. Its work remains unreviewed.'})
+        return writeJson(response, 200, {sources,accountEmail})
+      } catch(error) { return writeJson(response, 502, {error:'work_sources_unavailable',detail:String(error)}) }
     }
     if (request.method === 'GET' && url.pathname === '/v1/conversations') {
       const state = stateFilter(url.searchParams.get('state'))
@@ -585,7 +625,8 @@ export function createMailServer(
         return writeJson(response, draftStatus(error), draftError(error, 'gmail_draft_update_failed'))
       }
     }
-    if (request.method === 'POST' && url.pathname === '/v1/draft-saves') {
+    if (request.method === 'POST' && (url.pathname === '/v1/draft-saves' || url.pathname === '/v1/draft-sends')) {
+      const sending = url.pathname === '/v1/draft-sends'
       try {
         const body = draftObject(await readJson(request))
         if (!body || typeof body.accountId !== 'string' || !body.accountId || (body.draftId !== undefined && (typeof body.draftId !== 'string' || !body.draftId))) return writeJson(response, 400, { error: 'gmail_draft_fields_required' })
@@ -605,10 +646,17 @@ export function createMailServer(
           if (!Array.isArray(body.attachments) || draftAttachments(body.attachments).length !== body.attachments.length) return writeJson(response, 400, { error: 'invalid_draft_attachments' })
           fields.attachments = draftAttachments(body.attachments)
         }
-        if (!Object.keys(fields).length) return writeJson(response, 400, { error: 'draft_fields_required' })
-        const draft = baseline
+        if (!Object.keys(fields).length && (!sending || !draftId)) return writeJson(response, 400, { error: 'draft_fields_required' })
+        if (sending && !gmail.beginGmailDraftSend) return writeJson(response, 501, { error: 'draft_send_unavailable' })
+        if (sending && Object.keys(fields).length && ![fields.to, fields.cc, fields.bcc].some(value => value?.trim())) return writeJson(response, 400, { error: 'draft_recipient_required' })
+        if (sending) {
+          const previous = gmail.existingDraftSend?.(body.accountId, draftId, body.clientDraftId as string | undefined)
+          if (previous) return writeJson(response, 202, { receipt: previous })
+        }
+        const draft = !Object.keys(fields).length ? undefined : baseline
           ? gmail.enqueueDraftSave(body.accountId, typeof body.messageId === 'string' ? body.messageId : '', fields, draftId, body.clientDraftId as string | undefined, baseline)
           : gmail.enqueueDraftSave(body.accountId, typeof body.messageId === 'string' ? body.messageId : '', fields, draftId, body.clientDraftId as string | undefined)
+        if (sending) return writeJson(response, 202, { draft, receipt: gmail.beginGmailDraftSend!(body.accountId, draft?.id ?? draftId!, draft?.draftRevision) })
         return writeJson(response, 202, { draft })
       } catch (error) { return writeJson(response, 400, draftError(error, 'draft_save_rejected')) }
     }
@@ -662,6 +710,12 @@ export function createMailServer(
         if (code === 'draft_attachment_operation_cancelled' || code === 'draft_attachment_not_present') return writeJson(response, 409, { error: code, detail: String(error) })
         return writeJson(response, 502, { error: 'draft_attachment_failed', detail: String(error) })
       }
+    }
+    const draftSendStatusMatch = /^\/v1\/drafts\/([^/]+)\/send-status$/.exec(url.pathname)
+    if (request.method === 'GET' && draftSendStatusMatch?.[1]) {
+      const accountId = url.searchParams.get('account')
+      if (!accountId) return writeJson(response, 400, { error: 'gmail_account_required' })
+      return writeJson(response, 200, { receipt: gmail.existingDraftSend?.(accountId, decodeURIComponent(draftSendStatusMatch[1])) ?? null })
     }
     const draftMatch = /^\/v1\/drafts\/([^/]+)$/.exec(url.pathname)
     if (request.method === 'GET' && draftMatch?.[1]) {

@@ -15,6 +15,8 @@ bash "${ROOT}/scripts/dev-service.sh" "${ROOT}" mail &
 pids+=("$!")
 bash "${ROOT}/scripts/dev-service.sh" "${ROOT}" agent &
 pids+=("$!")
+bash "${ROOT}/scripts/dev-service.sh" "${ROOT}" work &
+pids+=("$!")
 bash "${ROOT}/scripts/dev-service.sh" "${ROOT}" web &
 pids+=("$!")
 

@@ -307,3 +307,40 @@ describe('folderFlagsFromLabels', () => {
     index.close()
   })
 })
+
+it('moves Spam to Trash and gives Trash priority over stale overlapping labels and counts', () => {
+  const index = new GmailIndex(':memory:')
+  try {
+    const spam = message('m1', true, false, { inSpam: true })
+    index.replaceAccount('account-1', [spam], 'seed', true)
+    index.applyConversationAction('account-1', ['m1'], 'trash', true)
+    expect(index.mailboxConversations('spam', 'all')).toEqual([])
+    expect(index.mailboxConversations('trash', 'all')).toHaveLength(1)
+    expect(index.mailboxCounts()).toEqual({ inbox: 0, drafts: 0, spam: 0 })
+    index.replaceAccount('account-1', [spam], 'stale', false)
+    expect(index.mailboxConversations('spam', 'all')).toEqual([])
+    index.finishAction(index.pendingActions()[0]!.id)
+    const overlapping = { ...spam, ...folderFlagsFromLabels(['SPAM', 'TRASH', 'INBOX', 'DRAFT']) }
+    expect(overlapping).toMatchObject({ inTrash: true, inSpam: false, inInbox: false, inDrafts: false })
+    index.replaceAccount('account-1', [overlapping], 'confirmed', false)
+    expect(index.mailboxConversations('spam', 'all')).toEqual([])
+    expect(index.mailboxCounts().spam).toBe(0)
+    index.replaceAccount('account-1', [{ ...overlapping, inInbox: true, inSpam: true, inDrafts: true }], 'legacy-overlap', false)
+    expect(index.mailboxCounts()).toEqual({ inbox: 0, drafts: 0, spam: 0 })
+  } finally { index.close() }
+})
+
+it('publishes durable work changes, avoids re-review for unchanged/read/archive snapshots, and records loss of evidence',()=>{
+ const directory=mkdtempSync(join(tmpdir(),'dispatch-work-feed-'));directories.push(directory);const path=join(directory,'gmail.sqlite');let index=new GmailIndex(path);
+ try {
+  const row=message('m1',true,true);index.replaceAccount('account-1',[row],'first',false);let page=index.workChanges(0,'2026-08-01T00:00:00Z',200);expect(page.events).toMatchObject([{threadId:row.threadId,available:true}]);const cursor=page.cursor;
+  index.replaceAccount('account-1',[row],'same',false);index.setUnread('account-1',['m1'],false);index.applyConversationAction('account-1',['m1'],'archive');expect(index.workChanges(cursor,'2026-08-01T00:00:00Z').events).toEqual([]);
+  index.replaceAccount('account-1',[message('m2',true,true,{threadId:row.threadId})],'arrival',false);page=index.workChanges(cursor,'2026-08-01T00:00:00Z');expect(page.events).toHaveLength(1);index.close();index=new GmailIndex(path);expect(index.workChanges(cursor,'2026-08-01T00:00:00Z').events).toHaveLength(1);
+  index.applyConversationAction('account-1',['m1','m2'],'trash');expect(index.workChanges(page.cursor,'2026-08-01T00:00:00Z').events.every(e=>!e.available)).toBe(true);
+ }finally{index.close();}
+});
+it('seeds existing indexed threads on migration and pages them with a stable saved cursor',()=>{
+ const directory=mkdtempSync(join(tmpdir(),'dispatch-work-migrate-'));directories.push(directory);const path=join(directory,'gmail.sqlite');let index=new GmailIndex(path);index.replaceAccount('account-1',[message('m1',true,true),message('m2',false,true)],'baseline',false);index.close();
+ const db=new DatabaseSync(path);db.exec('DROP TRIGGER gmail_work_insert;DROP TRIGGER gmail_work_update;DROP TRIGGER gmail_work_delete;DROP TABLE gmail_work_events;');db.close();index=new GmailIndex(path);
+ try {const first=index.workChanges(0,'2026-08-01T00:00:00Z',1),second=index.workChanges(first.cursor,'2026-08-01T00:00:00Z',1);expect(first.more).toBe(true);expect(first.events[0]?.threadId).toBe('thread-m1');expect(second.events[0]?.threadId).toBe('thread-m2');expect(second.more).toBe(false);expect(index.workChanges(second.cursor,'2026-08-01T00:00:00Z').events).toEqual([]);expect(()=>index.workChanges(second.cursor+100,'2026-08-01T00:00:00Z')).toThrow(/ahead/);}finally{index.close();}
+});

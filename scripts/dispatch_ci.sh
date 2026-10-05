@@ -13,7 +13,7 @@ if [ "${#script_tests[@]}" -gt 0 ]; then
   node --test "${script_tests[@]}"
 fi
 
-for service in mail agent web; do
+for service in mail agent work web; do
   echo "verify: services/${service}"
   npm --prefix "${ROOT}/services/${service}" ci --prefer-offline --no-audit --no-fund
   npm --prefix "${ROOT}/services/${service}" run typecheck

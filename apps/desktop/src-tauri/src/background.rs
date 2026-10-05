@@ -78,7 +78,7 @@ pub fn resume_after_failed_app_update() {
 
 fn drain() -> Result<bool, String> {
     let mut drained = Vec::new();
-    for service in [Service::Agent, Service::Mail] {
+    for service in [Service::Work, Service::Agent, Service::Mail] {
         if loaded(service) {
             let status = request(service, "/v1/runtime/drain", "POST");
             match status {
@@ -179,7 +179,7 @@ pub fn start(resources: &Path, home: &Path, logs: &Path, codex: Option<&Path>) -
     if update {
         if !drain()? { return Ok(false); }
         for service in Service::ALL { unload(service)?; }
-        let occupied = crate::preflight::wait_for_ports(&[8411, 8412], Duration::from_secs(5));
+        let occupied = crate::preflight::wait_for_ports(&[8411, 8412, 8413], Duration::from_secs(5));
         if !occupied.is_empty() { return Err(crate::preflight::describe_port_conflict(&occupied)); }
     }
     let agents = home.join("Library/LaunchAgents");
@@ -202,7 +202,7 @@ pub fn start(resources: &Path, home: &Path, logs: &Path, codex: Option<&Path>) -
 pub fn restart(resources: &Path, home: &Path, logs: &Path, codex: Option<&Path>) -> Result<(), String> {
     if !drain()? { return Err("Codex or a mail operation is still working. Let it finish before restarting services.".into()); }
     for service in Service::ALL { unload(service)?; }
-    let occupied = crate::preflight::wait_for_ports(&[8411, 8412], Duration::from_secs(5));
+    let occupied = crate::preflight::wait_for_ports(&[8411, 8412, 8413], Duration::from_secs(5));
     if !occupied.is_empty() { return Err(crate::preflight::describe_port_conflict(&occupied)); }
     start(resources, home, logs, codex).map(|_| ())
 }

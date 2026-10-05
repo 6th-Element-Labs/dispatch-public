@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'node:net'
+import { createServer } from 'node:http'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -257,6 +258,34 @@ describe('dispatch-agent', () => {
     expect(input[0]?.text).toContain('thread t1')
     expect(input[0]?.text).not.toContain('Selected email context supplied by Dispatch UI')
     expect(input[0]?.text).not.toContain('"subject":"Berth"')
+  })
+
+  it('carries saved contact work into new email chats and keeps chat usable if work is offline', async () => {
+    let available = true
+    const work = createServer((request, response) => {
+      expect(request.url).toBe('/v1/work/context?account=link-one&contact=jacob%40example.com')
+      response.writeHead(available ? 200 : 503, { 'content-type': 'application/json' })
+      response.end(JSON.stringify(available ? { items: [{ title: 'Send revised proposal', status: 'done' }, { kind: 'decision', title: 'Use approved budget' }] } : { error: 'unavailable' }))
+    })
+    servers.push(work)
+    await new Promise<void>(resolve => work.listen(0, '127.0.0.1', resolve))
+    const fake = runtime()
+    const server = createAgentServer(fake, { workBase: `http://127.0.0.1:${(work.address() as AddressInfo).port}` })
+    servers.push(server)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const send = () => fetch(`${base}/v1/threads/new-weekly-chat/turns`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'What is still open?', mailContext: { accountId: 'link-one', threadId: 'week-2', workContact: 'jacob@example.com' } }) })
+    expect((await send()).status).toBe(202)
+    let input = rpcParams(fake, 'turn/start').input as { text: string }[]
+    expect(input[0]?.text).toContain('Send revised proposal')
+    expect(input[0]?.text).toContain('Use approved budget')
+    expect(input[0]?.text).toContain('"status":"done"')
+    available = false
+    fake.request.mockClear()
+    expect((await send()).status).toBe(202)
+    input = rpcParams(fake, 'turn/start').input as { text: string }[]
+    expect(input[0]?.text).toContain('Saved work context is currently unavailable')
+    expect(input[0]?.text).not.toContain('Use approved budget')
   })
 
   it('serves the model catalog joined with usage buckets', async () => {
@@ -890,3 +919,19 @@ it('starts managed Codex reconnection without replaying email writes or logging 
   expect(fake.request).toHaveBeenCalledWith('account/login/start', { type: 'chatgpt' })
   expect(fake.request.mock.calls.some(call => call[0] === 'account/logout' || call[0] === 'mcpServer/tool/call')).toBe(false)
 })
+
+it('persists separate Codex bindings for a contact, topic and email',async()=>{
+  const {base,fake,bindings}=await startWithBindings()
+  let sequence=0
+  fake.request.mockImplementation(async(method:string)=>method==='thread/start'?{thread:{id:`scoped-${++sequence}`}}:method==='thread/resume'?{thread:{id:'existing'}}:{})
+  const keys=[{kind:'contact',accountId:'a',contextId:'jacob@example.com'},{kind:'topic',accountId:'a',contextId:'proposal'},{kind:'conversation',accountId:'a',gmailThreadId:'week1'}] as const
+  for(const key of keys){const response=await fetch(base+'/v1/threads/bindings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(key)});expect(response.status).toBe(200)}
+  expect(new Set(keys.map(key=>bindings.get(key))).size).toBe(3)
+})
+
+it('defers background analysis while an interactive Codex chat is working',async()=>{
+ const {base,fake}=await startWithBindings();const receive=fake.subscribe.mock.calls[0]![0];receive({method:'turn/started',params:{threadId:'user-chat',turn:{id:'user-turn'}}});const response=await fetch(`${base}/v1/work/extract`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'});expect(response.status).toBe(429);expect(await response.json()).toMatchObject({error:'interactive_codex_busy'});expect(fake.request).not.toHaveBeenCalledWith('thread/start',expect.anything());
+});
+it('publishes completed bound Codex discussions through the durable evidence feed only once',async()=>{
+ const {base,fake,bindings}=await startWithBindings();await bindings.put({kind:'contact',accountId:'account',contextId:'jacob@example.com'},'chat');const receive=fake.subscribe.mock.calls[0]![0];const complete={method:'turn/completed',params:{threadId:'chat',turn:{id:'turn',status:'completed'}}};receive(complete);receive(complete);const page=await (await fetch(`${base}/v1/work/changes?cursor=0`)).json();expect(page.events.filter((e:any)=>e.turnId==='turn')).toHaveLength(1);expect(page.events).toEqual(expect.arrayContaining([expect.objectContaining({accountId:'account',contextId:'jacob@example.com'})]));expect((await fetch(`${base}/v1/work/discussions?account=other&chat=chat`)).status).toBe(404);
+});

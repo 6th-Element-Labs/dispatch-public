@@ -1,3 +1,5 @@
+import { WorkPage } from './work-view.js'
+import { workApi, type WorkContext, type WorkSource, type WorkItem } from './work-api.js'
 import DOMPurify from 'dompurify'
 import { installWebLinks } from './web-links.js'
 import { DraftRecovery, type RecoveryDraft } from './draft-recovery.js'
@@ -100,7 +102,7 @@ app.innerHTML = `
         <div class="alert alert-danger m-3 dispatch-pane-error" role="alert" data-mail-error hidden></div>
         <div class="m-3" data-mail-reconnect hidden><button class="btn btn-outline-primary" data-reconnect-account><i class="ti ti-plug-connected me-1"></i>Reconnect Gmail</button><span class="ms-2 text-secondary" data-reconnect-status></span></div>
         <footer class="dispatch-mail-activity"><div class="dispatch-activity-status">        <span class="dispatch-sync" data-sync-state="idle"><span class="dispatch-sync-dot" aria-hidden="true"></span><span class="text-secondary" data-mail-source>Loading</span></span>
-        <button class="btn btn-icon btn-ghost-secondary btn-sm" type="button" data-refresh aria-label="Refresh" title="Refresh Gmail"><i class="ti ti-refresh" aria-hidden="true"></i></button></div><button class="btn btn-sm" data-activity-toggle aria-expanded="false" aria-controls="dispatch-activity"><i class="ti ti-activity" aria-hidden="true"></i><span>Mail activity</span></button><div class="dispatch-activity-popover" id="dispatch-activity" hidden><strong>Mail activity</strong><div class="dispatch-activity-options"><button type="button" class="nav-link" data-gmail-sync-open><i class="ti ti-brand-google" aria-hidden="true"></i><span>Gmail sync</span></button><button type="button" class="nav-link" data-offline-open><i class="ti ti-cloud-down" aria-hidden="true"></i><span>Offline</span></button></div><p class="small text-secondary mb-0">Downloaded mail</p></div></footer>
+        <button class="btn btn-icon btn-ghost-secondary btn-sm" type="button" data-refresh aria-label="Refresh" title="Refresh Gmail"><i class="ti ti-refresh" aria-hidden="true"></i></button></div><button class="btn btn-sm" data-activity-toggle aria-expanded="false" aria-controls="dispatch-activity"><i class="ti ti-activity" aria-hidden="true"></i><span>Mail activity</span><span data-send-status role="status" hidden></span></button><div class="dispatch-activity-popover" id="dispatch-activity" hidden><strong>Mail activity</strong><div class="dispatch-activity-options"><button type="button" class="nav-link" data-gmail-sync-open><i class="ti ti-brand-google" aria-hidden="true"></i><span>Gmail sync</span></button><button type="button" class="nav-link" data-offline-open><i class="ti ti-cloud-down" aria-hidden="true"></i><span>Offline</span></button></div><div data-send-activity></div><p class="small text-secondary mb-0">Downloaded mail</p></div></footer>
       </aside>
       <div class="dispatch-divider" data-divider="messages" role="separator" tabindex="0" aria-label="Resize messages panel" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="640"><i class="ti ti-grip-vertical" aria-hidden="true"></i></div>
       <main class="card rounded-0 border-0 dispatch-reader" aria-label="Selected email">
@@ -161,12 +163,8 @@ app.innerHTML = `
             <ul class="dispatch-draft-attachments" data-draft-attachments aria-label="Draft attachments" hidden></ul>
             <div class="dispatch-draft-preview markdown" id="dispatch-draft-preview" data-draft-preview aria-label="Draft preview" hidden></div>
             <p class="text-secondary small" data-draft-error hidden></p>
-            <div class="alert alert-warning" data-send-confirm hidden>
-              <p data-send-confirm-text></p>
-              <button class="btn btn-outline-secondary" type="button" data-send-cancel>Cancel</button>
-              <button class="btn btn-primary" type="button" data-send-confirm-go>Send now</button>
-            </div>
-            </div><footer class="card-footer d-flex flex-wrap align-items-center gap-1"><button class="btn btn-ghost-danger" type="button" data-discard-draft><i class="ti ti-trash me-1" aria-hidden="true"></i>Discard</button><button class="btn btn-ghost-secondary" type="button" data-attach-draft><i class="ti ti-paperclip me-1" aria-hidden="true"></i>Attach</button><input type="file" data-draft-files multiple hidden><button class="btn btn-ghost-secondary" type="button" data-revise-draft><i class="ti ti-sparkles me-1" aria-hidden="true"></i>Ask Codex to revise</button><button class="btn btn-ghost-secondary ms-auto" type="button" data-save-draft>Save draft</button><button class="btn btn-primary" type="button" data-send-draft><i class="ti ti-send me-1" aria-hidden="true"></i>Send draft</button></footer></div>
+
+            </div><footer class="card-footer d-flex flex-wrap align-items-center gap-1"><button class="btn btn-ghost-danger" type="button" data-discard-draft><i class="ti ti-trash me-1" aria-hidden="true"></i>Discard</button><button class="btn btn-ghost-secondary" type="button" data-attach-draft><i class="ti ti-paperclip me-1" aria-hidden="true"></i>Attach</button><input type="file" data-draft-files multiple hidden><button class="btn btn-ghost-secondary" type="button" data-revise-draft><i class="ti ti-sparkles me-1" aria-hidden="true"></i>Ask Codex to revise</button><button class="btn btn-primary ms-auto" type="button" data-send-draft><i class="ti ti-send me-1" aria-hidden="true"></i>Send</button></footer></div>
             </div>
           </section>
         </div>
@@ -295,9 +293,6 @@ const elements = {
   draftFiles: app.querySelector<HTMLInputElement>('[data-draft-files]')!,
   discardDraft: app.querySelector<HTMLButtonElement>('[data-discard-draft]')!,
   sendDraft: app.querySelector<HTMLButtonElement>('[data-send-draft]')!,
-  sendConfirm: app.querySelector<HTMLElement>('[data-send-confirm]')!,
-  sendConfirmText: app.querySelector<HTMLElement>('[data-send-confirm-text]')!,
-  sendConfirmGo: app.querySelector<HTMLButtonElement>('[data-send-confirm-go]')!,
   agentStatus: app.querySelector<HTMLElement>('[data-agent-status]')!,
   agentActivity: app.querySelector<HTMLElement>('[data-agent-activity]')!,
   connector: app.querySelector<HTMLElement>('[data-connector]')!,
@@ -354,6 +349,7 @@ installWebLinks(app, window as { isTauri?: unknown }, error => {
   elements.mailError.textContent = `Could not open link: ${error instanceof Error ? error.message : String(error)}`
 })
 
+let sourceHistoryMode=false
 let threadId: string | undefined
 let activeTurnId: string | undefined
 const promptSubmissions = new Set<string>()
@@ -374,7 +370,7 @@ function renderAgentComposer(): void {
   const stopIcon = elements.stop.querySelector<HTMLElement>('[data-stop-icon]')!
   stopIcon.className = stopping ? 'spinner-border spinner-border-sm' : 'ti ti-player-stop'
   elements.send.hidden = active && (!typed || stopping)
-  elements.send.disabled = !typed || stopping || submitting
+  elements.send.disabled = !typed || stopping || submitting || sourceHistoryMode
   elements.send.dataset.steering = String(active)
   elements.send.setAttribute('aria-label', active ? 'Update Codex direction' : 'Send')
   elements.send.title = active ? 'Update Codex direction while it works' : 'Send to Codex'
@@ -435,9 +431,9 @@ function sanitizeDraftPreview(html: string): string {
 }
 // Keep Gmail draft writes in order so a slow save cannot overwrite a newer save.
 let draftSaveFlight: Promise<DraftProjection | undefined> | undefined
-// Keep Gmail send confirmation single-flight.
-let draftSendFlight: Promise<void> | undefined
-let sendConfirmationRevision: number | undefined
+// These keys belong to submitted snapshots, independently of the editor the user opens next.
+const pendingDraftSends = new Set<string>()
+function draftIsSending(): boolean { return Boolean(recoveryKey && pendingDraftSends.has(recoveryKey)) }
 let draftDiscarding = false
 const recovery = new DraftRecovery()
 const draftEditLocks = new DraftEditLocks((navigator as Navigator & { locks?: unknown }).locks as LockManagerLike | undefined)
@@ -477,9 +473,9 @@ async function syncPendingDrafts(): Promise<void> {
   let pending = false
   const editedElsewhere = await draftEditLocks.localKeysHeldElsewhere()
   for (const record of recovery.list()) {
-    if (!record.accountId || backgroundDraftSaves.has(record.key)) continue
+    if (!record.accountId || backgroundDraftSaves.has(record.key) || pendingDraftSends.has(record.key)) continue
     if (record.key === recoveryKey && activeDraft) {
-      if (draftDirty && !draftSaveFlight && !draftSendFlight) autosaveDraft()
+      if (draftDirty && !draftSaveFlight && !draftIsSending()) autosaveDraft()
       continue
     }
     // Another window is editing this draft and saves it itself. Try again after that window lets go.
@@ -558,8 +554,10 @@ let readStateActionSequence = 0
 let conversationLoadSequence = 0
 const conversationCache = new Map<string, Promise<ConversationProjection>>()
 const BINDING_CACHE = 'dispatch.codex.bindings.v1'
-type CodexPaneKey = { kind: 'unbound' } | { kind: 'draft'; draftKey: string } | { kind: 'conversation'; accountId: string; gmailThreadId: string }
-const acceptedReadState = new Map<string, boolean>()
+let workPage: WorkPage | undefined
+let codexScopes: HTMLDivElement | undefined
+type CodexPaneKey = WorkContext | { kind: 'unbound' } | { kind: 'draft'; draftKey: string } | { kind: 'conversation'; accountId: string; gmailThreadId: string }
+const acceptedReadState = new Map<string, { unread: boolean; latestMessageId: string }>()
 // Explicit Mark as Unread stays unread until the user leaves and selects it again.
 const suppressReadDwell = new Set<string>()
 let desiredCodexKey: CodexPaneKey = { kind: 'unbound' }
@@ -613,13 +611,16 @@ function connectTaskActivity(): void {
 
 function bindingCacheKey(key: CodexPaneKey): string {
   if (key.kind === 'draft') return `draft:${key.draftKey}`
-  return key.kind === 'unbound' ? 'unbound' : `conversation:${key.accountId}:${key.gmailThreadId}`
+  if (key.kind === 'contact' || key.kind === 'topic') return `${key.kind}:${JSON.stringify([key.accountId,key.contextId])}`
+  return key.kind === 'conversation' ? `conversation:${key.accountId}:${key.gmailThreadId}` : 'unbound'
 }
 
 function selectCodexContext(key: CodexPaneKey): void {
+  sourceHistoryMode=false
   pendingCodexPrompts.set(bindingCacheKey(desiredCodexKey), elements.prompt.value)
   desiredCodexKey = key
-  app.querySelector<HTMLElement>('[data-codex-context]')!.textContent = key.kind === 'conversation' ? '· This email' : key.kind === 'draft' ? '· This draft' : '· General'
+  elements.prompt.placeholder = key.kind === 'contact' ? 'Ask Codex about this contact…' : key.kind === 'topic' ? 'Ask Codex about this topic…' : key.kind === 'conversation' ? 'Ask Codex about this email…' : 'Ask Codex…'
+  app.querySelector<HTMLElement>('[data-codex-context]')!.textContent = key.kind === 'conversation' ? '· This email' : key.kind === 'draft' ? '· This draft' : key.kind === 'contact' ? '· This contact' : key.kind === 'topic' ? '· This topic' : '· General'
   bindingSequence += 1
   paneSequence += 1
   codexContextReady = false
@@ -633,6 +634,7 @@ function selectCodexContext(key: CodexPaneKey): void {
   activeTurnId = undefined
   setAgentStatus('Connecting')
   renderBackgroundTasks()
+  renderCodexScopes()
 }
 
 function readBindingCache(): Record<string, string> {
@@ -859,9 +861,9 @@ function defaultEmptyListMessage(): string {
 const mailboxLabels: Record<GmailMailbox, string> = { inbox: 'Inbox', sent: 'Sent', drafts: 'Drafts', archive: 'Archive', spam: 'Spam', trash: 'Trash' }
 
 function renderMailbox(): void {
-  elements.mailboxTitle.textContent = mailboxLabels[mailbox]
+  elements.mailboxTitle.textContent = workPage?.active ? (workPage.mode === 'ea' ? 'EA' : 'To-dos') : mailboxLabels[mailbox]
   app.querySelectorAll<HTMLButtonElement>('[data-mailbox]').forEach((button) => {
-    const active = button.dataset.mailbox === mailbox
+    const active = !workPage?.active && button.dataset.mailbox === mailbox
     button.classList.toggle('active', active)
     button.setAttribute('aria-current', active ? 'page' : 'false')
   })
@@ -1237,6 +1239,7 @@ async function openAttachment(message: MessageProjection, attachmentId: string, 
 }
 
 async function selectConversation(id: string, options: { revealOnMobile?: boolean; startReadDwell?: boolean; refresh?: boolean } = {}): Promise<void> {
+  if (workPage?.active) return
   const previousId = selectedConversationId
   markReadDwell.cancel()
   const matchResult = searchView?.results.find(result => result.conversation.id === id)
@@ -1362,7 +1365,7 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
     // Cached bodies can have old labels. The current mailbox projection and
     // accepted commands own the row and toolbar's read state together.
     const currentSummary = conversations.find(item => item.id === id) ?? summary
-    selected = { ...conversation, unread: acceptedReadState.get(id) ?? currentSummary.unread }
+    selected = { ...conversation, unread: acceptedUnread(currentSummary) ?? currentSummary.unread }
     threadRefreshFailed = false
     readerNeedsRetry = !offlineMode && conversation.availability?.mode === 'downloaded'
     renderCopyChip(conversation.availability)
@@ -1428,6 +1431,7 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
         ;(message?.querySelector('mark') ?? message)?.scrollIntoView({ block: 'center' })
       }
     }
+    renderRelatedWork()
     prefetchConversations(id)
     if (keepCodex) return
     try {
@@ -1468,7 +1472,7 @@ async function completeReadDwell(conversationId: string): Promise<void> {
   try {
     await api.setConversationUnread(summary.threadId, summary.accountId, false, messageIds)
     if (selectedConversationId !== conversationId || actionSequence !== readStateActionSequence || suppressReadDwell.has(conversationId)) return
-    applyLocalReadState(conversationId, false)
+    applyLocalReadState(conversationId, false, summary.latestMessageId)
   } catch (error) {
     if (selectedConversationId !== conversationId) return
     elements.mailError.hidden = false
@@ -1476,8 +1480,10 @@ async function completeReadDwell(conversationId: string): Promise<void> {
   }
 }
 
-function applyLocalReadState(conversationId: string, unread: boolean): void {
-  acceptedReadState.set(conversationId, unread)
+function applyLocalReadState(conversationId: string, unread: boolean, latestMessageId: string): void {
+  const current = conversations.find(conversation => conversation.id === conversationId)
+  if (current && current.latestMessageId !== latestMessageId) return
+  acceptedReadState.set(conversationId, { unread, latestMessageId })
   if (unread) suppressReadDwell.add(conversationId)
   else suppressReadDwell.delete(conversationId)
   dropConversationCache(conversationId)
@@ -1502,10 +1508,21 @@ function dropConversationCache(conversationId: string): void {
   }
 }
 
+function acceptedUnread(conversation: ConversationSummary): boolean | undefined {
+  const accepted = acceptedReadState.get(conversation.id)
+  if (accepted && accepted.latestMessageId !== conversation.latestMessageId) {
+    acceptedReadState.delete(conversation.id)
+    suppressReadDwell.delete(conversation.id)
+    return undefined
+  }
+  return accepted?.unread
+}
+
 function applyAcceptedReadState(items: readonly ConversationSummary[]): ConversationSummary[] {
   return items
     .map((conversation) => {
-      const unread = acceptedReadState.get(conversation.id)
+      const unread = acceptedUnread(conversation)
+      if (unread === conversation.unread) acceptedReadState.delete(conversation.id)
       return unread === undefined ? conversation : { ...conversation, unread }
     })
     .filter((conversation) => mailState === 'all' || (mailState === 'unread' ? conversation.unread : !conversation.unread))
@@ -1513,8 +1530,8 @@ function applyAcceptedReadState(items: readonly ConversationSummary[]): Conversa
 
 function syncSelectedReadState(): void {
   if (!selected || !selectedConversationId) return
-  const unread = acceptedReadState.get(selectedConversationId)
-    ?? conversations.find((conversation) => conversation.id === selectedConversationId)?.unread
+  const summary = conversations.find(conversation => conversation.id === selectedConversationId)
+  const unread = summary ? acceptedUnread(summary) ?? summary.unread : undefined
   if (unread === undefined || selected.unread === unread) return
   selected = { ...selected, unread }
   renderReadState(unread)
@@ -1533,12 +1550,13 @@ async function applyReadState(nextUnread: boolean, target: ConversationSummary |
   markReadDwell.cancel()
   readStateActionSequence += 1
   const conversationId = target.id
+  const latestMessageId = conversations.find(conversation => conversation.id === conversationId)?.latestMessageId ?? target.latestMessageId
   const messageIds = selected?.id === conversationId ? selected.messages.map(message => message.id) : []
   elements.readState.disabled = true
   renderReadState(!nextUnread, true)
   try {
     await api.setConversationUnread(target.threadId, target.accountId, nextUnread, messageIds)
-    applyLocalReadState(conversationId, nextUnread)
+    applyLocalReadState(conversationId, nextUnread, latestMessageId)
   } catch (error) {
     if (selectedConversationId === conversationId) renderReadState(selected?.unread ?? target.unread)
     elements.mailError.hidden = false
@@ -1594,7 +1612,7 @@ async function openInMessageWindow(id: string): Promise<void> {
 
 let poppingOutDraft = false
 async function popOutDraft(): Promise<void> {
-  if (inMessageWindow || !activeDraft || draftSendFlight || draftDiscarding || poppingOutDraft) return
+  if (inMessageWindow || !activeDraft || draftIsSending() || draftDiscarding || poppingOutDraft) return
   poppingOutDraft = true
   const session = draftEditSession
   let key: string | undefined
@@ -1651,7 +1669,7 @@ async function openThreadContextMenu(event: MouseEvent, conversationId: string):
   const load = selectConversation(conversationId, { revealOnMobile: true })
   const summary = conversations.find((conversation) => conversation.id === conversationId)
   if (!summary) return
-  const unread = acceptedReadState.get(conversationId) ?? summary.unread
+  const unread = acceptedUnread(summary) ?? summary.unread
   const items = threadContextMenuItems({ mailbox, unread, hasAccountId: Boolean(summary.accountId), openWindow: !inMessageWindow && canOpenMessageWindow(mailbox) })
   try {
     const chosen = await popupContextMenu(items, { clientX: event.clientX, clientY: event.clientY })
@@ -1954,9 +1972,9 @@ async function refreshOpenedDraft(draft: DraftProjection, sequence: number, revi
   }
 }
 
-function checkpointDraft(): boolean {
+function checkpointDraft(force = false): boolean {
   if (!activeDraft) return true
-  if (!activeDraft.id && draftSeed?.fields === editorFields() && draftSeed.attachments === activeDraft.attachments) {
+  if (!force && !activeDraft.id && draftSeed?.fields === editorFields() && draftSeed.attachments === activeDraft.attachments) {
     // Reserve the identity for edits made while the initial Gmail create is
     // pending, without listing an untouched reply as an unsaved draft.
     recoveryKey ??= crypto.randomUUID()
@@ -2181,7 +2199,7 @@ function freezeDraft(disabled: boolean): void {
   elements.draftBody.disabled = disabled
   elements.draft.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>('input,textarea,select,button').forEach(control => { control.disabled = disabled })
   if (!disabled) elements.draftAccount.disabled = Boolean(activeDraft?.id)
-  if (!disabled) elements.sendDraft.disabled = Boolean(activeDraft?.cachedAt || activeDraft?.syncState)
+  if (!disabled) elements.sendDraft.disabled = Boolean(activeDraft?.conflict)
 }
 
 function draftError(error: unknown): void {
@@ -2189,10 +2207,6 @@ function draftError(error: unknown): void {
     elements.recoveryStatus.textContent = 'Saved · waiting to sync'
     elements.draftError.hidden = true
     scheduleDraftSync()
-    if (!elements.sendConfirm.hidden) {
-      elements.draftError.hidden = false
-      elements.draftError.textContent = 'Sending could not be confirmed. Your draft is kept. Check Sent before trying again.'
-    }
     return
   }
   elements.draftError.hidden = false
@@ -2310,14 +2324,13 @@ function showDraft(draft: DraftProjection, accountMutable: boolean): void {
   elements.draftError.textContent = ''
   resolvingDraftConflict = false
   renderDraftConflict()
-  elements.sendConfirm.hidden = true
   renderDraftAttachments()
   draftSeed = { fields: editorFields(), attachments: draft.attachments }
   draftDiscarding = false
   elements.recoveryStatus.textContent = draft.syncState ? (draft.syncError ?? 'Saved · waiting to sync') : draft.cachedAt ? 'Checking Gmail…' : ''
   if (draft.reconnectRequired) elements.mailReconnect.hidden = false
   elements.recoveryStatus.title = draft.cachedAt ? `Last confirmed ${new Date(draft.cachedAt).toLocaleString()}` : ''
-  freezeDraft(Boolean(draftSendFlight))
+  freezeDraft(Boolean(draftIsSending()))
   syncDraftEditLock()
   void recovery.cacheFiles(draft.attachments).then(() => { if (activeDraft?.id === draft.id && draftDirty) checkpointDraft() }).catch(draftError)
 }
@@ -2339,7 +2352,6 @@ function hideDraftEditor(): void {
   renderDraftConflict()
   syncDraftEditLock()
   elements.draft.hidden = true
-  elements.sendConfirm.hidden = true
   elements.draftError.hidden = true
   elements.reader.classList.remove('dispatch-drafting', 'dispatch-composing')
   if (selected) {
@@ -2368,7 +2380,7 @@ function autosaveDraft(): void {
   if (draftAutosaveTimer !== undefined) window.clearTimeout(draftAutosaveTimer)
   draftAutosaveTimer = window.setTimeout(() => {
     draftAutosaveTimer = undefined
-    if (draftDirty && activeDraft && !offlineMode && !draftSendFlight) {
+    if (draftDirty && activeDraft && !offlineMode && !draftIsSending()) {
       if (activeDraft.conflict) return
       const addresses = [elements.draftTo, elements.draftCc, elements.draftBcc].flatMap(field => parseRecipientList(recipientValue(field)))
       if (addresses.some(address => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))) return
@@ -2482,7 +2494,8 @@ async function openForward(): Promise<void> {
   activeForwardOrigin = { accountId: selected.accountId, messageId: latestMessageId }
 }
 
-function openCompose(existingKey?: string): void {
+function openCompose(existingKey?: string): Promise<boolean> | undefined {
+  leaveWork()
   const accountId = selectedAccountId ?? selected?.accountId ?? accounts[0]?.id
   if (!accountId) {
     addAgentMessage('error', 'Connect a Gmail account before composing mail.')
@@ -2497,7 +2510,7 @@ function openCompose(existingKey?: string): void {
   selected = undefined
   selectedSummary = undefined
   selectedConversationId = undefined
-  void bindAndShowCodex(codexKey, { sequence })
+  const binding=bindAndShowCodex(codexKey, { sequence })
   if (usesMobilePanels()) {
     mobilePanel = 'reader'
     mobileReturnPanel = 'reader'
@@ -2513,6 +2526,7 @@ function openCompose(existingKey?: string): void {
   showDraft(draft, true)
   recoveryKey = codexKey.draftKey
   syncDraftEditLock()
+  return binding
 }
 
 async function saveDraft(notify = true): Promise<void> {
@@ -2572,7 +2586,7 @@ async function saveDraft(notify = true): Promise<void> {
     if (draftEditRevision === savingRevision) renderDraftAttachments()
     renderDraftConflict()
     syncDraftEditLock()
-    elements.sendDraft.disabled = Boolean(savedDraft.syncState)
+    elements.sendDraft.disabled = Boolean(savedDraft.conflict)
     elements.draftAccount.disabled = true
     elements.draftPreview.innerHTML = sanitizeDraftPreview(savedDraft.bodyHtml)
     elements.draftError.hidden = true
@@ -2601,7 +2615,7 @@ async function saveDraft(notify = true): Promise<void> {
     if (session === draftEditSession && activeDraft) {
       elements.draftAccount.disabled = Boolean(activeDraft.id)
       if (!savedSuccessfully) elements.recoveryStatus.textContent = 'Saved · waiting to sync'
-      if (savedSuccessfully && draftDirty && activeDraft.id && !draftSendFlight) autosaveDraft()
+      if (savedSuccessfully && draftDirty && activeDraft.id && !draftIsSending()) autosaveDraft()
     }
   }
 }
@@ -2627,68 +2641,117 @@ async function reviseDraft(): Promise<void> {
   await sendPrompt()
 }
 
-function sendDraft(): void {
-  if (offlineMode) { checkpointDraft(); draftError(new Error('Go online to send. Your local draft is kept.')); return }
-  if (!activeDraft || draftSendFlight) return
-  if (![elements.draftTo, elements.draftCc, elements.draftBcc].some(field => recipientValue(field).trim())) { draftError(new Error('Add a recipient before sending.')); return }
-  sendConfirmationRevision = draftEditRevision
-  elements.sendConfirmText.textContent = [
-    `To: ${recipientValue(elements.draftTo) || '(no recipient)'}`,
-    recipientValue(elements.draftCc) ? `Cc: ${recipientValue(elements.draftCc)}` : '',
-    recipientValue(elements.draftBcc) ? `Bcc: ${recipientValue(elements.draftBcc)}` : '',
-    `Subject: ${elements.draftSubject.value || '(no subject)'}`,
-  ].filter(Boolean).join('\n')
-  elements.sendConfirm.hidden = false
+let sendActivityFlight: Promise<void> | undefined
+function refreshSendActivity(): Promise<void> {
+  void reconcileSentDraft()
+  if (sendActivityFlight) return sendActivityFlight
+  sendActivityFlight = api.pendingSends().then(sends => {
+    const content = app.querySelector<HTMLElement>('[data-send-activity]')!
+    content.replaceChildren()
+    for (const send of sends) {
+      const line = document.createElement('p')
+      line.className = 'small mt-2 mb-0'
+      line.textContent = ['preparing', 'sending'].includes(send.status) ? 'Sending reply…' : send.error || 'Could not send reply.'
+      if (['failed', 'unknown'].includes(send.status)) {
+        const open = document.createElement('button'); open.type = 'button'; open.className = 'btn btn-sm btn-link'; open.textContent = send.status === 'unknown' ? 'Check Sent' : 'Open reply'
+        open.onclick = () => { void (async () => {
+          if (activeDraft && !checkpointDraft()) return
+          if (send.status === 'unknown') { mailbox = 'sent'; renderMailbox(); await loadConversations(); return }
+          const draft = await api.failedSendDraft(send.id)
+          if (!draft) throw new Error('This reply is unavailable. Check Drafts and Sent.')
+          const key = draft.id.startsWith('queued-') ? draft.id.slice(7) : send.id
+          recovery.save({ key, revision: draft.draftRevision ?? 0, updatedAt: new Date().toISOString(), accountId: send.accountId,
+            gmailDraftId: draft.id, inReplyToMessageId: draft.inReplyToMessageId, gmailThreadId: draft.gmailThreadId,
+            to: draft.to.map(item => item.address).join(', '), cc: draft.cc ?? '', bcc: draft.bcc ?? '', subject: draft.subject, bodyMarkdown: draft.bodyMarkdown }, draft.attachments)
+          await restoreLocalDraft(key)
+          elements.draftError.hidden = false; elements.draftError.textContent = send.error || 'Could not send reply.'
+        })().catch(draftError) }
+        line.append(open)
+      }
+      content.append(line)
+    }
+    const status = app.querySelector<HTMLElement>('[data-send-status]')!
+    if (!pendingDraftSends.size) {
+      status.hidden = !sends.length
+      status.textContent = sends.some(send => ['preparing', 'sending'].includes(send.status)) ? ' · Sending…' : sends.length ? ' · Send failed' : ''
+    }
+  }).catch(error => console.error('Send activity could not be read:', error)).finally(() => { sendActivityFlight = undefined })
+  return sendActivityFlight
 }
 
-async function confirmSendDraft(): Promise<void> {
-  if (!activeDraft || draftSendFlight || draftDiscarding) return
-  const session = draftEditSession
+function renderSending(): void {
+  const status = app.querySelector<HTMLElement>('[data-send-status]')!
+  status.hidden = !pendingDraftSends.size
+  status.textContent = pendingDraftSends.size > 1 ? ` · Sending ${pendingDraftSends.size}…` : ' · Sending…'
+}
+
+function sendDraft(): void {
+  if (offlineMode) { checkpointDraft(); draftError(new Error('Go online to send. Your reply is kept.')); return }
+  if (!activeDraft || draftIsSending() || draftDiscarding) return
+  if (activeDraft.conflict) { draftError(new Error('Choose which reply version to keep before sending.')); return }
+  const recipients = [elements.draftTo, elements.draftCc, elements.draftBcc].flatMap(field => parseRecipientList(recipientValue(field)))
+  if (!recipients.length) { draftError(new Error('Add a recipient before sending.')); return }
+  if (recipients.some(address => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))) { draftError(new Error('Check the recipient addresses before sending.')); return }
+  if (!checkpointDraft(true)) return
+  const key = recoveryKey ?? crypto.randomUUID()
+  const draft = activeDraft
+  const accountId = draft.id ? draft.accountId : elements.draftAccount.value
+  if (!accountId) { draftError(new Error('Choose an account before sending.')); return }
   const revision = draftEditRevision
-  const sendingRecoveryKey = recoveryKey
-  const originalId = activeDraft.id
-  const originalAccount = activeDraft.id ? activeDraft.accountId : elements.draftAccount.value
-  if (sendConfirmationRevision !== revision || ![elements.draftTo, elements.draftCc, elements.draftBcc].some(field => recipientValue(field).trim())) {
-    elements.sendConfirm.hidden = true
-    throw new Error('The draft changed. Review its recipients before sending again.')
-  }
-  const operation = (async () => {
-    if (draftSaveFlight) await draftSaveFlight
-    if (session !== draftEditSession || revision !== draftEditRevision) throw new Error('The draft changed before sending. Review it again.')
-    // An unchanged Gmail draft already has its exact recipients, MIME body, and files.
-    // Do not rewrite it from the editor's projection as a side effect of Send.
-    if (!activeDraft?.id || draftDirty) await saveDraft()
-    if (session !== draftEditSession || revision !== draftEditRevision
-      || (originalId && activeDraft?.id !== originalId) || activeDraft?.accountId !== originalAccount) {
-      throw new Error('The draft changed before sending. Review it again.')
-    }
-    const draft = activeDraft
-    if (!draft?.id || !draft.accountId) throw new Error('Save the Gmail draft before sending it.')
-    const receipt = await api.sendDraft(draft.id, draft.accountId)
-    if (!receipt) throw new Error('The send was not confirmed. Check Sent before retrying.')
-    if (receipt.status !== 'accepted' && receipt.status !== 'verified') throw new Error(receipt.error || 'The send outcome is uncertain. Check Sent before retrying.')
-    clearRecovery(sendingRecoveryKey)
-    if (session === draftEditSession && activeDraft?.id === draft.id && activeDraft.accountId === draft.accountId) hideDraftEditor()
-    void loadConversations()
+  const conversation = selected
+  let snapshot: DraftProjection = { ...draft, accountId, to: parseRecipientList(recipientValue(elements.draftTo)).map(address => ({ name: address, address, initials: '@' })),
+    cc: recipientValue(elements.draftCc), bcc: recipientValue(elements.draftBcc), subject: elements.draftSubject.value,
+    bodyMarkdown: elements.draftBody.value, bodyText: elements.draftBody.value }
+  const changed = !draft.id || draftDirty
+  const fields = { accountId, clientDraftId: key, draftId: draft.id || undefined, messageId: draft.inReplyToMessageId,
+    ...(changed ? { to: snapshot.to.map(item => item.address).join(', '), cc: snapshot.cc, bcc: snapshot.bcc, subject: snapshot.subject, bodyMarkdown: snapshot.bodyMarkdown,
+      ...(!draft.id || draftAttachmentsChanged ? { attachments: snapshot.attachments } : {}),
+      ...(draftBase?.id === draft.id ? { base: baselineSnapshot(draftBase) } : {}) } : {}) }
+  pendingDraftSends.add(key)
+  hideDraftEditor()
+  renderSending()
+  void (async () => {
+    try {
+      // Mail accepts the newest snapshot immediately and owns the save/send operation.
+      const submitted = await api.submitDraftSend(fields)
+      if (submitted.draft) { snapshot = { ...snapshot, id: submitted.draft.id, draftRevision: submitted.draft.draftRevision }; void linkDraftTask(key, submitted.draft).catch(console.error) }
+      if (!submitted.receipt?.id) throw new Error('Send was not acknowledged. Check Sent before trying again. Your reply is kept.')
+      recovery.removeSavedRevision(key, revision)
+      renderRecoveryList()
+      let receipt = submitted.receipt
+      while (receipt.status === 'preparing' || receipt.status === 'sending') {
+        await new Promise<void>(resolve => window.setTimeout(resolve, 500))
+        receipt = await api.draftSendStatus(receipt.id)
+      }
+      if (receipt.status !== 'accepted' && receipt.status !== 'verified') throw new Error(receipt.error || 'Send was not confirmed. Check Sent before trying again.')
+      void loadConversations()
+      if (selected && conversation && selected.id === conversation.id) void selectConversation(selected.id, { refresh: true })
+    } catch (error) {
+      const message = describeRequestError(error instanceof Error ? error.message : String(error))
+      // A failure never overwrites another editor or another conversation.
+      if (!activeDraft && selected?.id === conversation?.id) {
+        showDraft(snapshot, false)
+        recoveryKey = key
+        draftDirty = changed
+        syncDraftEditLock()
+        elements.draftError.hidden = false
+        elements.draftError.textContent = message
+        checkpointDraft()
+      } else {
+        recovery.save({ key, revision, updatedAt: new Date().toISOString(), accountId, gmailDraftId: snapshot.id,
+          inReplyToMessageId: snapshot.inReplyToMessageId, gmailThreadId: snapshot.gmailThreadId,
+          to: snapshot.to.map(item => item.address).join(', '), cc: snapshot.cc ?? '', bcc: snapshot.bcc ?? '', subject: snapshot.subject, bodyMarkdown: snapshot.bodyMarkdown }, snapshot.attachments)
+        draftSyncErrors.set(key, message)
+        renderRecoveryList()
+        elements.mailError.hidden = false
+        elements.mailError.textContent = `Could not send “${snapshot.subject || 'New message'}”. Your reply is in Drafts. ${message}`
+      }
+    } finally { pendingDraftSends.delete(key); renderSending(); void refreshSendActivity() }
   })()
-  draftSendFlight = operation
-  elements.sendConfirmGo.disabled = true
-  elements.sendDraft.disabled = true
-  elements.discardDraft.disabled = true
-  freezeDraft(true)
-  try {
-    await operation
-  } finally {
-    freezeDraft(false)
-    if (draftSendFlight === operation) draftSendFlight = undefined
-    elements.sendConfirmGo.disabled = false
-    elements.sendDraft.disabled = false
-    elements.discardDraft.disabled = false
-  }
 }
 
 async function discardDraft(): Promise<void> {
-  if (draftSendFlight || draftDiscarding) return
+  if (draftIsSending() || draftDiscarding) return
   const draft = activeDraft
   if (!draft) return
   draftDiscarding = true
@@ -3386,7 +3449,7 @@ function handleAgentEvent(message: AgentEvent): void {
     activeAgentText = ''
     const draftToRefresh = activeDraft
     if (draftToRefresh?.id && draftToRefresh.accountId && codexDraftFlights === 0) {
-      void refreshCodexDraft(draftToRefresh.id, draftToRefresh.accountId, false)
+      void reconcileSentDraft().then(closed => { if (!closed && activeDraft === draftToRefresh) void refreshCodexDraft(draftToRefresh.id, draftToRefresh.accountId!, false) })
     }
   }
   if (message.method === 'item/agentMessage/delta') {
@@ -3419,6 +3482,27 @@ function handleAgentEvent(message: AgentEvent): void {
   }
 }
 
+let sentDraftRefresh = false
+/** Mail resolves queued/Gmail aliases; only a confirmed send can consume a clean editor. */
+async function reconcileSentDraft(): Promise<boolean> {
+  const draft = activeDraft
+  if (!draft?.id || !draft.accountId || offlineMode || sentDraftRefresh || draftDirty || draftSaveFlight || draftIsSending() || draftDiscarding) return false
+  const session = draftEditSession
+  const revision = draftEditRevision
+  sentDraftRefresh = true
+  try {
+    const receipt = await api.sentDraftStatus(draft.id, draft.accountId)
+    if (!receipt || receipt.accountId !== draft.accountId || !['accepted', 'verified'].includes(receipt.status)) return false
+    if (session !== draftEditSession || revision !== draftEditRevision || activeDraft?.id !== draft.id || activeDraft.accountId !== draft.accountId || draftDirty || draftSaveFlight || draftDiscarding) return false
+    clearRecovery()
+    hideDraftEditor()
+    void refreshMailboxCounts()
+    if (mailbox === 'drafts') void loadConversations(true)
+    return true
+  } catch { return false }
+  finally { sentDraftRefresh = false }
+}
+
 let codexDraftFlights = 0
 let codexDraftRequest = 0
 
@@ -3443,7 +3527,7 @@ async function refreshCodexDraft(draftId: string, accountId: string, createdByCo
     if (snapshot.selection !== selectionSequence || snapshot.pane !== paneSequence) return
     if (requestErrorCode(String(error)) === 'gmail_draft_not_found') {
       // Codex sent the draft or Gmail replaced it; the id in the event is already stale.
-      if (activeDraft?.id === draftId && activeDraft.accountId === accountId && !draftDirty && !draftSaveFlight) { clearRecovery(); hideDraftEditor() }
+      await reconcileSentDraft()
       addAgentMessage('tool', 'Gmail no longer has that draft; it was sent or replaced. Drafts has been refreshed.')
       if (mailbox === 'drafts') void loadConversations(true)
       return
@@ -3478,7 +3562,7 @@ async function applyCodexMailEffect(effect: CodexMailEffect): Promise<void> {
     await refreshCodexDraft(effect.draftId, effect.accountId, true)
     return
   }
-  if (effect.draftId && activeDraft?.id === effect.draftId && activeDraft.accountId === effect.accountId && !draftDirty && !draftSaveFlight) { clearRecovery(); hideDraftEditor() }
+  await reconcileSentDraft()
   if (!offlineMode) void loadConversations(true)
 }
 
@@ -3575,7 +3659,7 @@ async function bindAndShowCodex(key: CodexPaneKey, options: { adoptThreadId?: st
     await showCodexThread(binding.threadId, binding.created, binding.replaced, binding.detail)
     if (!current()) return false
     const context = selected ?? (mailbox === 'drafts' ? conversations.find((item) => item.id === selectedConversationId) : undefined)
-    const currentKey = context ? conversationBindingKey(context) : !selectedConversationId ? desiredCodexKey : undefined
+    const currentKey = workPage?.active || key.kind==='contact' || key.kind==='topic' ? desiredCodexKey : context ? conversationBindingKey(context) : !selectedConversationId ? desiredCodexKey : undefined
     if (currentKey && JSON.stringify(key) === JSON.stringify(currentKey) && (options.sequence === undefined || options.sequence === selectionSequence)) codexContextReady = true
     const restore = pendingMailEffects.get(binding.threadId)
     if (codexContextReady && restore) {
@@ -3660,7 +3744,7 @@ async function connectAgent(): Promise<void> {
 
 async function sendPrompt(): Promise<void> {
   const text = elements.prompt.value.trim()
-  if (!text || !threadId) return
+  if (!text || !threadId || sourceHistoryMode) return
   const targetThreadId = threadId
   const interrupt = interruptRequests.get(targetThreadId)
   if (promptSubmissions.has(targetThreadId) || (interrupt && interrupt.turnId === activeTurnId && !interrupt.error)) return
@@ -3681,7 +3765,8 @@ async function sendPrompt(): Promise<void> {
       ...userChoseModel() ? { model: selectedModelId } : {},
       ...userChoseEffort() ? { effort: selectedEffort } : {},
       appId: gmailAppId(apps),
-      mailContext: selected || activeDraft ? {
+      workContext: desiredCodexKey.kind==='contact'||desiredCodexKey.kind==='topic' ? desiredCodexKey : undefined,
+      mailContext: !workPage?.active && desiredCodexKey.kind!=='contact' && desiredCodexKey.kind!=='topic' && (selected || activeDraft) ? {
         searchMatch: selected && searchView ? { query: searchView.query, hits: searchView.results.find(result => result.conversation.id === selectedConversationId)?.hits } : undefined,
         draft: activeDraft ? { id: activeDraft.id, accountId: activeDraft.accountId, to: recipientValue(elements.draftTo), cc: recipientValue(elements.draftCc), bcc: recipientValue(elements.draftBcc), subject: elements.draftSubject.value, hasUnsavedChanges: draftDirty } : undefined,
         accountId: selected?.accountId,
@@ -3689,6 +3774,7 @@ async function sendPrompt(): Promise<void> {
         threadId: selected?.threadId,
         subject: selected?.subject,
         sender: selected?.sender.address,
+        workContact: selected ? (selected.sender.address!==accounts.find(a=>a.id===selected!.accountId)?.email?selected.sender.address:selected.messages.flatMap(m=>m.to??[]).find(a=>a.address!==accounts.find(account=>account.id===selected!.accountId)?.email)?.address) : undefined,
         attachment: selectedAttachmentContext?.accountId === selected?.accountId
           && selectedAttachmentContext?.threadId === selected?.threadId
           && selected?.messages.some((message) => message.id === selectedAttachmentContext?.messageId
@@ -3883,7 +3969,7 @@ async function loadConversations(preserveSelection = false): Promise<void> {
     : ''
   elements.mailSource.textContent = usedCache ? `Refreshing · cached ${cacheLabel}` : 'Loading'
   elements.mailError.hidden = true
-  if (!preserveSelection) {
+  if (!preserveSelection && !workPage?.active) {
     markReadDwell.cancel()
     selected = undefined
     selectedSummary = undefined
@@ -4093,13 +4179,13 @@ async function refreshSyncStatus(): Promise<void> {
 let queuedDraftRefresh = false
 async function refreshQueuedDraft(): Promise<void> {
   const draft = activeDraft
-  if (!draft || (!draft.syncState && !draft.conflict) || !draft.accountId || queuedDraftRefresh || draftSaveFlight || draftSendFlight || draftDiscarding) return
+  if (!draft || (!draft.syncState && !draft.conflict) || !draft.accountId || queuedDraftRefresh || draftSaveFlight || draftIsSending() || draftDiscarding) return
   const session = draftEditSession
   const revision = draftEditRevision
   queuedDraftRefresh = true
   try {
     const fresh = await api.getDraft(draft.id, draft.accountId)
-    if (session !== draftEditSession || activeDraft?.id !== draft.id || draftSaveFlight || draftSendFlight || draftDiscarding) return
+    if (session !== draftEditSession || activeDraft?.id !== draft.id || draftSaveFlight || draftIsSending() || draftDiscarding) return
     if (fresh.accountId !== draft.accountId || (fresh.id !== draft.id && fresh.resolvedFromDraftId !== draft.id)) throw new Error('Draft identity changed unexpectedly')
     if (draftBase?.id === draft.id && fresh.id !== draft.id && fresh.resolvedFromDraftId === draft.id) draftBase = { ...draftBase, id: fresh.id }
     if (!draftDirty && revision === draftEditRevision) showDraft(fresh, false)
@@ -4143,7 +4229,8 @@ elements.reconnectAccount.addEventListener('click', () => {
 function startSyncStatusWatch(): void {
   if (syncStatusTimer !== undefined) return
   void refreshSyncStatus()
-  syncStatusTimer = window.setInterval(() => { void refreshSyncStatus() }, 5_000)
+  void refreshSendActivity()
+  syncStatusTimer = window.setInterval(() => { void refreshSyncStatus(); void refreshSendActivity() }, 5_000)
 }
 
 function scheduleMailReconnect(delayMs = 1_500): void {
@@ -4403,9 +4490,11 @@ document.addEventListener('visibilitychange', () => {
 elements.account.addEventListener('change', () => {
   clearSearchView()
   selectedAccountId = elements.account.value || undefined
+  if(workPage?.active) { void openWork(workPage.mode); return }
   void loadConversations()
 })
 function switchMailbox(next: GmailMailbox): void {
+  leaveWork()
   clearSearchView()
   mailbox = next
   renderMailbox()
@@ -4458,26 +4547,21 @@ elements.spam.addEventListener('click', () => { void mutateSelected('spam') })
 elements.trash.addEventListener('click', () => { void mutateSelected('trash') })
 elements.moveInbox.addEventListener('click', () => { void mutateSelected('inbox') })
 app.querySelector('[data-ask]')?.addEventListener('click', askCodex)
-app.querySelector('[data-save-draft]')?.addEventListener('click', () => { void saveDraft().catch(draftError) })
 app.querySelector('[data-pop-out-draft]')?.addEventListener('click', () => { void popOutDraft() })
 elements.useGmailVersion.addEventListener('click', () => { void resolveDraftConflict('use-remote') })
 elements.keepLocalEdits.addEventListener('click', () => { void resolveDraftConflict('keep-local') })
 app.querySelector('[data-send-draft]')?.addEventListener('click', sendDraft)
-app.querySelector('[data-send-cancel]')?.addEventListener('click', () => { elements.sendConfirm.hidden = true })
-app.querySelector('[data-send-confirm-go]')?.addEventListener('click', () => { void confirmSendDraft().catch(draftError) })
 app.querySelector('[data-discard-draft]')?.addEventListener('click', () => { void discardDraft().catch(discardError) })
 app.querySelector('[data-attach-draft]')?.addEventListener('click', () => { elements.draftFiles.click() })
 elements.draftFiles.addEventListener('change', () => { void attachDraftFiles() })
 elements.draftBody.addEventListener('input', () => {
-  elements.sendConfirm.hidden = true
   markDraftDirty()
   refreshPreview()
   autosaveDraft()
 })
 for (const field of [elements.draftTo, elements.draftCc, elements.draftBcc]) {
   field.addEventListener('input', () => {
-    elements.sendConfirm.hidden = true
-    markDraftDirty()
+      markDraftDirty()
     onRecipientInput(field)
     if (activeDraft?.id) autosaveDraft()
   })
@@ -4502,11 +4586,10 @@ for (const field of [elements.draftTo, elements.draftCc, elements.draftBcc]) {
   })
 }
 elements.draftSubject.addEventListener('input', () => {
-  elements.sendConfirm.hidden = true
   markDraftDirty()
   if (activeDraft?.id) autosaveDraft()
 })
-elements.draftAccount.addEventListener('input', () => { markDraftDirty(); elements.sendConfirm.hidden = true })
+elements.draftAccount.addEventListener('input', () => { markDraftDirty(); autosaveDraft() })
 app.querySelector('[data-revise-draft]')?.addEventListener('click', () => { void reviseDraft().catch(draftError) })
 elements.readState.addEventListener('click', () => { void toggleReadState() })
 elements.send.addEventListener('click', () => { void sendPrompt() })
@@ -4829,6 +4912,7 @@ document.addEventListener('keydown', (event) => {
 })
 window.addEventListener('resize', renderPanels)
 window.addEventListener('keydown', (event) => {
+  if (workPage?.active && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {event.preventDefault();return}
   if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'k') {
     event.preventDefault()
     elements.search.focus()
@@ -4856,6 +4940,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 window.addEventListener('keydown', (event) => {
+  if (workPage?.active) return
   if (event.key !== 'Delete' && event.key !== 'Backspace') return
   if (event.altKey || event.ctrlKey || event.shiftKey || (event.metaKey && event.key === 'Delete')) return
   if (isEditableTarget(event.target) || isEditableTarget(document.activeElement)) return
@@ -4915,6 +5000,7 @@ for (const [name, key] of Object.entries(TOOLBAR_KEYS)) {
 let pendingGo = false
 let pendingGoTimer: number | undefined
 window.addEventListener('keydown', (event) => {
+  if (workPage?.active) return
   if (event.defaultPrevented || isEditableTarget(event.target) || isEditableTarget(document.activeElement)) return
   if (app.querySelector('dialog[open]')) return
   const resolved = resolveShortcut(event, pendingGo)
@@ -4954,11 +5040,104 @@ undoToast.root.addEventListener('mouseenter', pauseUndoCountdown)
 undoToast.root.addEventListener('mouseleave', () => { if (!undoToast.root.hidden && undoTimer === undefined) startUndoCountdown(undoRemaining || UNDO_WINDOW_MS) })
 window.addEventListener('keydown', (event) => {
   if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey || event.key.toLowerCase() !== 'z') return
+  if (workPage?.active) return
   if (undoToast.root.hidden || isEditableTarget(event.target) || isEditableTarget(document.activeElement)) return
   event.preventDefault()
   void undoLastMove()
 })
 
+codexScopes=document.createElement('div');codexScopes.className='work-codex-scopes';codexScopes.setAttribute('role','group');codexScopes.setAttribute('aria-label','Codex context scope')
+const codexHeader=app.querySelector('[data-codex-context]')!.closest('header')
+if(codexHeader){const row=document.createElement('div');row.className=codexHeader.className;row.append(...codexHeader.childNodes);codexHeader.className='';codexHeader.append(row,codexScopes)}
+function renderCodexScopes():void{
+  // This function is also called during startup, before the optional controls exist.
+  if(!codexScopes)return
+  codexScopes.replaceChildren()
+  const scopes=workPage?.active?workPage.scopes:undefined
+  const self=accounts.find(a=>a.id===selected?.accountId)?.email
+  const contact=selected?.sender.address!==self?selected?.sender.address:selected?.messages.flatMap(m=>m.to??[]).find(a=>a.address!==self)?.address
+  const options:[string,WorkContext|undefined,WorkSource|undefined][]=[['Email',undefined,scopes?.email],['Contact',scopes?.contact??(selected?.accountId&&contact?{kind:'contact',accountId:selected.accountId,contextId:contact}:undefined),undefined],['Topic',scopes?.topic,undefined]]
+  for(const [label,context,source] of options){
+    const button=document.createElement('button');button.type='button';button.className='btn btn-sm btn-ghost-secondary';button.textContent=label;button.setAttribute('aria-label',`${label} context`);button.disabled=label==='Email'?!selected&&!source:!context;button.setAttribute('aria-pressed',String(label==='Email'?desiredCodexKey.kind==='conversation':desiredCodexKey.kind===label.toLowerCase()))
+    button.onclick=()=>{if(label==='Email'){if(source)void openWorkSource(source);else if(selected){const key=conversationBindingKey(selected);selectCodexContext(key);void bindAndShowCodex(key)}}else if(context){if(workPage?.active)workPage.context=context;selectCodexContext(context);void bindAndShowCodex(context)}}
+    codexScopes.append(button)
+  }
+  codexScopes.hidden=!selected&&!workPage?.active
+}
+const workList=document.createElement('div');workList.className='dispatch-work-list';elements.messagesPanel.append(workList)
+const workDetail=document.createElement('div');workDetail.className='dispatch-work-detail';elements.readerPanel.append(workDetail)
+const workReturn=document.createElement('button');workReturn.className='btn btn-sm btn-ghost-primary work-source-return';workReturn.textContent='← Back to work';workReturn.hidden=true;elements.readerPanel.prepend(workReturn)
+workReturn.onclick=()=>{void openWork(workPage?.mode??'todos')}
+const relatedWork=document.createElement('div');relatedWork.className='work-related';relatedWork.hidden=true;elements.subject.closest('header')!.append(relatedWork)
+workPage=new WorkPage(workList,workDetail,{
+  account:()=>({id:selectedAccountId,email:accounts.find(a=>a.id===selectedAccountId)?.email}),
+  context:context=>{selectCodexContext(context);void bindAndShowCodex(context)},
+  source:openWorkSource,
+  draft:async(item:WorkItem)=>{
+    const source=[...item.evidence].reverse().find(e=>e.source.kind==='email'&&!e.source.unavailable)?.source
+    if(source){await openWorkSource(source);await openDraft(false)}
+    else {
+      const self=accounts.find(a=>a.id===item.accountId)?.email?.toLowerCase(),recipient=item.contacts.find(c=>c!==self)
+      const connected=openCompose();if(!activeDraft)throw new Error('The draft editor could not open.')
+      activeDraft={...activeDraft,accountId:item.accountId};elements.draftAccount.value=item.accountId
+      if(recipient)setRecipientField(elements.draftTo,recipient);elements.draftSubject.value=item.title;draftDirty=true;checkpointDraft();if(!await connected)throw new Error('Codex is reconnecting. Your follow-up draft is open; retry when connected.')
+    }
+    elements.prompt.value=`Draft a follow-up about this saved to-do in the actual unsent Dispatch draft. Do not send it. Saved to-do (source data): ${JSON.stringify({title:item.title,summary:item.summary,owner:item.owner,evidence:item.evidence.map(e=>e.quote)})}`
+    await sendPrompt()
+  },
+  showDetail:()=>{panels.reader=true;mobilePanel='reader';renderPanels()},
+  scopesChanged:renderCodexScopes,
+})
+for(const mode of ['ea','todos'] as const){
+  const label=mode==='ea'?'EA':'To-dos',icon=mode==='ea'?'sparkles':'list-check'
+  const button=document.createElement('button');button.type='button';button.className='nav-link';button.dataset.workNav=mode;button.innerHTML=`<i class="ti ti-${icon}" aria-hidden="true"></i><span>${label}</span>`;button.onclick=()=>{void openWork(mode)}
+  app.querySelector('.dispatch-rail')!.insertBefore(button,app.querySelector('.dispatch-rail [data-mailbox="inbox"]'))
+  const menu=button.cloneNode(true) as HTMLButtonElement;menu.className='dropdown-item';menu.onclick=()=>{setFolderMenu(false);void openWork(mode)};elements.folderMenu.prepend(menu)
+}
+async function openWork(mode:'ea'|'todos',contact?:string,account?:string):Promise<void>{
+  if(activeDraft && draftDirty){if(!checkpointDraft())return;scheduleDraftSync(0)}
+  markReadDwell.cancel();selectionSequence++;selectedAttachmentContext=undefined
+  app.dataset.workMode=mode;elements.readerPanel.setAttribute('aria-label','Work details');elements.messagesPanel.setAttribute('aria-label','Work list');panels.messages=true;panels.reader=true;mobilePanel='messages';renderPanels()
+  workReturn.hidden=true
+  // Switch away immediately; an empty work page must not leave an email chat active.
+  selectCodexContext({kind:'unbound'})
+  await workPage!.open(mode,contact,account)
+  if(workPage!.active&&!workPage!.context)void bindAndShowCodex({kind:'unbound'})
+  renderMailbox()
+  app.querySelectorAll<HTMLElement>('[data-work-nav]').forEach(b=>{b.classList.toggle('active',b.dataset.workNav===mode);b.setAttribute('aria-current',b.dataset.workNav===mode?'page':'false')})
+}
+function leaveWork():void{
+  if(!workPage?.active)return
+  workPage.close();delete app.dataset.workMode;elements.readerPanel.setAttribute('aria-label','Selected email');elements.messagesPanel.setAttribute('aria-label','Messages')
+  app.querySelectorAll<HTMLElement>('[data-work-nav]').forEach(b=>{b.classList.remove('active');b.setAttribute('aria-current','false')})
+  renderMailbox()
+}
+async function openWorkSource(source:WorkSource):Promise<void>{
+  if(source.kind==='codex'&&source.codexThreadId){
+    sourceHistoryMode=true
+    await showCodexThread(source.codexThreadId,false,false)
+    agentEvents?.close();agentEvents=undefined;activeTurnId=undefined;codexContextReady=false
+    elements.prompt.placeholder='Choose Contact or Topic to continue…'
+    app.querySelector<HTMLElement>('[data-codex-context]')!.textContent='· Source history'
+    setAgentStatus('Source history');renderAgentComposer();panels.agent=true;mobilePanel='agent';renderPanels()
+    return
+  }
+  const conversation=await api.readConversation(source.threadId,source.accountId,false,'inbox')
+  leaveWork();mailbox='inbox';renderMailbox()
+  if(!conversations.some(c=>c.id===conversation.id))conversations.unshift(conversation)
+  conversationCache.set(conversationCacheKey(conversation),Promise.resolve(conversation))
+  await selectConversation(conversation.id,{revealOnMobile:true})
+  workReturn.hidden=false
+}
+function renderRelatedWork():void{
+  renderCodexScopes()
+  relatedWork.replaceChildren();relatedWork.hidden=!selected?.accountId
+  if(!selected?.accountId)return
+  const account=selected.accountId,thread=selected.threadId,self=accounts.find(a=>a.id===selected!.accountId)?.email,contact=(selected.sender.address!==self?selected.sender.address:selected.messages.flatMap(m=>m.to??[]).find(a=>a.address!==self)?.address??selected.sender.address).toLowerCase()
+  const button=document.createElement('button');button.className='btn btn-sm btn-ghost-primary';button.innerHTML='<i class="ti ti-list-check me-1" aria-hidden="true"></i>Work across threads';button.title=`Open work involving ${contact}`;button.onclick=()=>{void openWork('todos',contact,account)}
+  const analyze=document.createElement('button');analyze.className='btn btn-sm btn-ghost-secondary';analyze.textContent='Find to-dos in this thread';analyze.onclick=async()=>{analyze.disabled=true;analyze.textContent='Reviewing…';try{await workApi.analyze(account,thread);if(selected?.threadId===thread&&selected.accountId===account)await openWork('todos',contact,account)}catch(e){analyze.textContent='Retry review';analyze.title=String(e)}finally{analyze.disabled=false}}
+  relatedWork.append(button,analyze)
+}
 renderMailbox()
 renderPanels()
 void start()

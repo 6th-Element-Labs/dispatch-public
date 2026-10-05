@@ -18,8 +18,8 @@ export function folderFlagsFromLabels(labels: readonly unknown[]): Pick<
 > {
   // Gmail keeps INBOX, SENT, and DRAFT labels on messages it has moved to
   // Trash or Spam; a trashed draft is in Trash, not in Drafts.
-  const inSpam = labels.includes('SPAM')
   const inTrash = labels.includes('TRASH')
+  const inSpam = !inTrash && labels.includes('SPAM')
   const shelved = inSpam || inTrash
   const inInbox = !shelved && labels.includes('INBOX')
   const inSent = !shelved && labels.includes('SENT')
@@ -46,10 +46,10 @@ export function flagsAfterAction(
     }
   }
   if (action === 'trash') {
-    return { ...message, inTrash: true, inInbox: false, inArchive: false, inSent: false, inDrafts: false }
+    return { ...message, inTrash: true, inSpam: false, inInbox: false, inArchive: false, inSent: false, inDrafts: false }
   }
   if (action === 'spam') {
-    return { ...message, inSpam: true, inInbox: false, inArchive: false }
+    return { ...message, inSpam: true, inTrash: false, inInbox: false, inSent: false, inDrafts: false, inArchive: false }
   }
   return { ...message, inInbox: true, inSpam: false, inTrash: false, inArchive: false }
 }
@@ -102,6 +102,7 @@ function queueEligible(message: IndexedGmailMessage, state: MailStateFilter): bo
 }
 
 function folderMember(message: IndexedGmailMessage, mailbox: Exclude<GmailMailbox, 'inbox'>): boolean {
+  if (mailbox !== 'trash' && message.inTrash) return false
   if (mailbox === 'sent') return message.inSent
   if (mailbox === 'drafts') return message.inDrafts
   if (mailbox === 'archive') return message.inArchive
@@ -205,8 +206,37 @@ export class GmailIndex {
         this.#db.exec(`ALTER TABLE gmail_messages ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`)
       }
     }
+    // Source changes commit with mail rows, including direct history and local label actions.
+    // Read/archive changes do not need another inference; source availability does.
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS gmail_work_events(seq INTEGER PRIMARY KEY AUTOINCREMENT,account_id TEXT NOT NULL,thread_id TEXT NOT NULL,received_at TEXT NOT NULL,baseline INTEGER NOT NULL DEFAULT 0);
+      CREATE TRIGGER IF NOT EXISTS gmail_work_insert AFTER INSERT ON gmail_messages BEGIN
+        INSERT INTO gmail_work_events(account_id,thread_id,received_at) VALUES(NEW.account_id,NEW.thread_id,NEW.received_at); END;
+      CREATE TRIGGER IF NOT EXISTS gmail_work_update AFTER UPDATE ON gmail_messages
+        WHEN OLD.subject<>NEW.subject OR OLD.preview<>NEW.preview OR OLD.received_at<>NEW.received_at OR OLD.in_drafts<>NEW.in_drafts OR OLD.in_spam<>NEW.in_spam OR OLD.in_trash<>NEW.in_trash
+        BEGIN INSERT INTO gmail_work_events(account_id,thread_id,received_at) VALUES(NEW.account_id,NEW.thread_id,NEW.received_at); END;
+      CREATE TRIGGER IF NOT EXISTS gmail_work_delete AFTER DELETE ON gmail_messages BEGIN
+        INSERT INTO gmail_work_events(account_id,thread_id,received_at) VALUES(OLD.account_id,OLD.thread_id,OLD.received_at); END;
+      INSERT INTO gmail_work_events(account_id,thread_id,received_at,baseline)
+        SELECT account_id,thread_id,max(received_at),1 FROM gmail_messages
+        WHERE NOT EXISTS(SELECT 1 FROM gmail_work_events) GROUP BY account_id,thread_id ORDER BY max(received_at) DESC;
+    `)
     for (const row of this.#db.prepare('SELECT CAST(key AS BLOB) AS key,action FROM gmail_action_overlay').all()) this.#acceptedActions.set(Buffer.from(row.key as Uint8Array).toString(), String(row.action) as GmailConversationAction)
     for (const row of this.#db.prepare('SELECT CAST(key AS BLOB) AS key,unread FROM gmail_unread_overlay').all()) this.#acceptedUnread.set(Buffer.from(row.key as Uint8Array).toString(), row.unread === 1)
+  }
+
+  workChanges(cursor:number,since:string,limit=200) {
+    const head=Number(this.#db.prepare('SELECT coalesce(max(seq),0) AS seq FROM gmail_work_events').get()!.seq);
+    if(cursor>head)throw new Error('Mail source cursor is ahead of its owner.');
+    const rows=this.#db.prepare(`SELECT seq,account_id,thread_id,baseline FROM gmail_work_events WHERE seq>? AND (baseline=0 OR received_at>=?) ORDER BY seq LIMIT ?`).all(cursor,since,limit+1);
+    const page=rows.slice(0,limit),more=rows.length>limit;
+    const events=page.map(r=>({seq:Number(r.seq),accountId:String(r.account_id),threadId:String(r.thread_id),baseline:r.baseline===1,
+      available:!!this.#db.prepare('SELECT 1 FROM gmail_messages WHERE account_id=? AND thread_id=? AND in_drafts=0 AND in_spam=0 AND in_trash=0 LIMIT 1').get(String(r.account_id),String(r.thread_id))}));
+    return {events,cursor:more?events.at(-1)!.seq:head,more,accounts:this.accounts(),coverage:'indexed',sync:this.status()};
+  }
+
+  excludedWorkMessageIds(accountId:string,threadId:string):readonly string[]{
+    return this.#db.prepare('SELECT id FROM gmail_messages WHERE account_id=? AND thread_id=? AND (in_drafts=1 OR in_spam=1 OR in_trash=1)').all(accountId,threadId).map(row=>String(row.id));
   }
 
   historyCheckpoint(accountId: string, email: string): string | undefined {
@@ -719,9 +749,9 @@ export class GmailIndex {
     const spam = new Set<string>()
     for (const message of this.messages(accountId)) {
       const key = `${message.accountId}:${message.threadId}`
-      if (message.inInbox && message.unread) inbox.add(key)
-      if (message.inDrafts) drafts.add(key)
-      if (message.inSpam) spam.add(key)
+      if (queueEligible(message, 'unread')) inbox.add(key)
+      if (folderMember(message, 'drafts')) drafts.add(key)
+      if (folderMember(message, 'spam')) spam.add(key)
     }
     return { inbox: inbox.size, drafts: drafts.size, spam: spam.size }
   }

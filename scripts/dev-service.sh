@@ -13,6 +13,7 @@ case "${service_name}" in
   web) service_port=8410 ;;
   mail) service_port=8411 ;;
   agent) service_port=8412 ;;
+  work) service_port=8413 ;;
   *) echo "unknown Dispatch service: ${service_name}" >&2; exit 64 ;;
 esac
 

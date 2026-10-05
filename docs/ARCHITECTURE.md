@@ -162,3 +162,21 @@ Editor saves can supply their original remote baseline. Mail compares changed fi
 The supported connector inventory exposes search pagination, not Gmail history checkpoints. Sync retains bounded head checks and complete-stream reconciliation; repeated token cycles and incomplete scans fail without reconciling missing mail as deleted. A history adapter or direct OAuth transport requires a supported provider capability or Dispatch-owned OAuth registration and is not implied by these repairs. Codex App Server remains the agent harness and connector transport.
 
 If managed Codex login renewal fails, the mail-owned projection exposes `reconnectRequired`. The Reconnect control starts App Server's `account/login/start` and opens its official OAuth URL in the system browser; App Server owns the localhost callback. Normal worker retries resume saving after sign-in. Manual refresh or wake can retry pending saves immediately. Browser recovery remains responsible for typing that has not yet been accepted by mail.
+
+## Durable work service
+
+EA and To-dos use the independently packaged `services/work` process on port 8413.
+It owns SQLite task/decision state, source links, contact/topic identity, extraction
+checkpoints and attention ranking. Mail exports canonical evidence over HTTP;
+agent exports bound Codex discussion evidence and provides structured inference
+through Codex App Server. Neither owns work records. See [EA and To-dos](EA_TODOS.md).
+
+### Immediate editor Send
+
+`POST /v1/draft-sends` accepts the current editor fields using the durable draft-save contract, or an unchanged Gmail draft identity without rewriting MIME. Mail persists its preparing send record synchronously and returns HTTP 202. Its one-shot background operation completes the submitted save revision and sends only that confirmed Gmail draft. The operation is counted for runtime drain, rejects stale editor writes while active, and is deduplicated by account/draft identity. `GET /v1/draft-sends` and `GET /v1/draft-sends/:id` expose active/failing status and mail-owned failure recovery without provider calls. Restart marks interrupted preparation failed and interrupted delivery unknown; neither is automatically replayed. Web closes the editor on click, retains local recovery until mail accepts the snapshot, and reports delivery failures without replacing another editor.
+
+### Mail state reconciliation
+
+Mail resolves queued draft IDs and Gmail draft IDs for `GET /v1/drafts/:id/send-status?account=...`. This read returns the durable send outcome without accessing Gmail or sending. A confirmed send invalidates the saved draft cache. The UI closes only the same clean editor revision; it checks again after Codex completion and on the normal status poll, including sends made through shell/HTTP tools.
+
+Read commands apply to the displayed message IDs. The UI read overlay is scoped to the conversation's latest message ID and expires when the mailbox confirms it or a newer message arrives. Folder actions apply to every currently indexed message in the thread, plus the supplied reader IDs. Trash removes Spam as well as Inbox. Folder counts use the same eligibility rules as their lists, and Trash takes priority over overlapping provider labels.

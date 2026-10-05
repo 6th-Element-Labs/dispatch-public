@@ -54,3 +54,11 @@ Normal builds and automated tests keep the existing direct service addresses. Op
 ## Web pages
 
 Mail links must never replace the workbench. A separate web window has permanent Dispatch-owned navigation, a readable current host and an explicit Return to Mail action. The website cannot draw over or remove these controls. Standard window close and keyboard commands work. Returning preserves the selected email and any unsaved draft; it does not reload mail. Use a real child webview for websites, because many sites reject iframe embedding.
+
+## EA and To-dos rail extension
+
+The approved work wireframe extends the mail rail with EA and To-dos above Inbox.
+Both use the existing list, reading and Codex panes. Task details show quiet status,
+owner/date, source trail and direct actions; contact/topic chats remain scoped.
+Suggestions are separate from explicit commitments. Review progress stays within
+work views, without adding mail popups. See `docs/EA_TODOS.md`.

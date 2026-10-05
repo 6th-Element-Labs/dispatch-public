@@ -45,7 +45,7 @@ shasum -a 256 -c SHA256SUMS.txt
 Install Node 22, Rust, and the Codex CLI. Then run:
 
 ```bash
-for dir in services/web services/mail services/agent apps/desktop; do
+for dir in services/web services/mail services/agent services/work apps/desktop; do
   npm --prefix "$dir" ci
 done
 npm --prefix apps/desktop run fetch-node

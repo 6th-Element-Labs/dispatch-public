@@ -184,6 +184,21 @@ export const api = {
     })
     return result.draft
   },
+  async submitDraftSend(fields: Record<string, unknown>): Promise<{ draft?: DraftProjection; receipt: SendReceipt }> {
+    return request(`${MAIL}/v1/draft-sends`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(durableDraftFields(fields)) })
+  },
+  async pendingSends(): Promise<SendReceipt[]> {
+    return (await request<{ sends: SendReceipt[] }>(`${MAIL}/v1/draft-sends`)).sends
+  },
+  async failedSendDraft(id: string): Promise<DraftProjection | undefined> {
+    return (await request<{ draft?: DraftProjection }>(`${MAIL}/v1/draft-sends/${encodeURIComponent(id)}`)).draft
+  },
+  async draftSendStatus(id: string): Promise<SendReceipt> {
+    return (await request<{ receipt: SendReceipt }>(`${MAIL}/v1/draft-sends/${encodeURIComponent(id)}`)).receipt
+  },
+  async sentDraftStatus(id: string, accountId: string): Promise<SendReceipt | undefined> {
+    return (await request<{ receipt: SendReceipt | null }>(`${MAIL}/v1/drafts/${encodeURIComponent(id)}/send-status?account=${encodeURIComponent(accountId)}`)).receipt ?? undefined
+  },
   async sendDraft(id: string, accountId: string): Promise<SendReceipt | undefined> {
     const result = await request<{ receipt?: SendReceipt }>(`${MAIL}/v1/drafts/${encodeURIComponent(id)}?action=send&account=${encodeURIComponent(accountId)}`, { method: 'POST' })
     return result.receipt
@@ -205,7 +220,7 @@ export const api = {
     const result = await request<{ thread: { id: string } }>(`${AGENT}/v1/threads`, { method: 'POST' })
     return result.thread.id
   },
-  async bindThread(key: { kind: 'unbound' } | { kind: 'draft'; draftKey: string } | { kind: 'conversation'; accountId: string; gmailThreadId: string }, adoptThreadId?: string, options: { replace?: boolean } = {}): Promise<{ key: unknown; threadId: string; created: boolean; replaced: boolean; detail?: string }> {
+  async bindThread(key: {kind:'contact'|'topic';accountId:string;contextId:string} | { kind: 'unbound' } | { kind: 'draft'; draftKey: string } | { kind: 'conversation'; accountId: string; gmailThreadId: string }, adoptThreadId?: string, options: { replace?: boolean } = {}): Promise<{ key: unknown; threadId: string; created: boolean; replaced: boolean; detail?: string }> {
     const result = await request<{ binding: { key: unknown; threadId: string; created: boolean; replaced: boolean; detail?: string } }>(`${AGENT}/v1/threads/bindings`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...key, ...adoptThreadId ? { adoptThreadId } : {}, ...options.replace ? { replace: true } : {} }),
     })

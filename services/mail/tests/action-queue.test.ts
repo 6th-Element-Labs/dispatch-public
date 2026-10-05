@@ -253,7 +253,7 @@ it('accepts folder changes during a provider failure and replays them in order a
     failing = false
     provider = new GmailConnectorProvider(base, { indexPath: path })
     await provider.flushActions()
-    expect(accepted).toMatchObject([{ removeLabels: ['INBOX'], addLabels: [] }, { removeLabels: ['UNREAD'], addLabels: [] }, { removeLabels: ['INBOX'], addLabels: ['TRASH'] }])
+    expect(accepted).toMatchObject([{ removeLabels: ['INBOX'], addLabels: [] }, { removeLabels: ['UNREAD'], addLabels: [] }, { removeLabels: ['INBOX', 'SPAM'], addLabels: ['TRASH'] }])
     provider.stopBackgroundSync()
     const final = new GmailIndex(path)
     expect(final.pendingActions()).toEqual([])
@@ -325,7 +325,7 @@ it('keeps same-account action order while another account progresses and drain p
     expect(calls.map(call => [call.account, call.addLabels, call.removeLabels])).toEqual([
       ['A', [], ['INBOX']],
       ['B', [], ['INBOX']],
-      ['A', ['TRASH'], ['INBOX']],
+      ['A', ['TRASH'], ['INBOX', 'SPAM']],
     ])
     expect(provider.runtimeStatus().activeOperations).toBe(0)
   } finally {
@@ -334,4 +334,28 @@ it('keeps same-account action order while another account progresses and drain p
     await new Promise<void>(resolve => server.close(() => resolve()))
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+it('deletes every indexed message in a Spam thread even when the reader supplies an older subset', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-spam-trash-'))
+  const path = join(dir, 'index.sqlite')
+  const seed = new GmailIndex(path)
+  const original: IndexedGmailMessage = { id: 'old', threadId: 'thread', accountId: 'one', accountLabel: 'Test', sender: { name: 'Test', address: 'test@example.com', initials: 'T' }, subject: 'Disposable Spam', receivedAt: '2026-10-05T01:00:00Z', receivedLabel: 'Today', receivedFullLabel: 'Today', preview: '', unread: true, inInbox: false, inArchive: false, inSent: false, inDrafts: false, inSpam: true, inTrash: false }
+  seed.replaceAccount('one', [original, { ...original, id: 'new' }], 'seed', true); seed.close()
+  let command: Record<string, unknown> | undefined
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk))
+    command = JSON.parse(Buffer.concat(chunks).toString() || '{}')
+    res.setHeader('content-type', 'application/json'); res.end('{}')
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const provider = new GmailConnectorProvider(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, { indexPath: path, localPath: ':memory:' })
+  try {
+    await provider.mutateConversation('one', 'thread', ['old'], 'trash')
+    expect(await provider.listMailboxConversations('spam', 'all')).toEqual([])
+    expect((await provider.mailboxCounts()).spam).toBe(0)
+    await provider.flushActions()
+    expect(command).toEqual({ linkId: 'one', messageIds: ['old', 'new'], addLabels: ['TRASH'], removeLabels: ['INBOX', 'SPAM'] })
+    expect(await provider.listMailboxConversations('trash', 'all')).toHaveLength(1)
+  } finally { provider.stopBackgroundSync(); await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true }) }
 })

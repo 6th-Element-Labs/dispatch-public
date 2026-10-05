@@ -1310,6 +1310,21 @@ export class GmailConnectorProvider {
     }
   }
 
+  async readWorkConversation(accountId: string, threadId: string): Promise<ConversationProjection> {
+    const cached=this.#local.conversation(accountId,threadId)
+    const ids=this.#index?.threadMessageIds(accountId,threadId) ?? []
+    const conversation=await this.readConversation(accountId,threadId,Boolean(cached?.conversation.completeness?.complete && ids.length && ids.every(id=>cached.conversation.messages.some(m=>m.id===id))))
+    const excluded=new Set(this.#index?.excludedWorkMessageIds(accountId,threadId)??[])
+    const messages=conversation.messages.filter(m=>!excluded.has(m.id));
+    if(!messages.length)throw new Error('This thread has no eligible email evidence.');
+    return {...projectConversation(messages,'gmail'),completeness:conversation.completeness,availability:conversation.availability}
+  }
+
+  workChanges(cursor:number,since:string,limit:number) {
+    if(!this.#index)throw new Error('The durable Gmail index is unavailable.');
+    return this.#index.workChanges(cursor,since,limit);
+  }
+
   offlineStatus() { return { ...this.#local.stats(), download: this.#download } }
   downloadedConversations(mailbox: GmailMailbox, state: MailStateFilter, accountId?: string, query = ''): readonly ConversationSummary[] {
     if (!this.#index) return []
@@ -1368,7 +1383,7 @@ export class GmailConnectorProvider {
 
   async mutateConversation(accountId: string, threadId: string, messageIds: readonly string[], action: GmailConversationAction): Promise<void> {
     if (!accountId || !threadId) throw new Error('Gmail conversation action requires account and thread identity')
-    const effectiveMessageIds = messageIds.length ? messageIds : this.#index?.threadMessageIds(accountId, threadId) ?? []
+    const effectiveMessageIds = [...new Set([...(this.#index?.threadMessageIds(accountId, threadId) ?? []), ...messageIds])]
     if (this.#index && effectiveMessageIds.length) {
       this.#index.applyConversationAction(accountId, effectiveMessageIds, action, true)
       void this.flushActions()
@@ -1442,7 +1457,7 @@ export class GmailConnectorProvider {
         const value = await this.#post('/v1/connectors/gmail/modify', {
           linkId: job.accountId, messageIds: job.messageIds,
           addLabels: job.action === 'unread' ? ['UNREAD'] : job.action === 'trash' ? ['TRASH'] : job.action === 'spam' ? ['SPAM'] : job.action === 'inbox' ? ['INBOX'] : [],
-          removeLabels: job.action === 'read' ? ['UNREAD'] : job.action === 'unread' ? [] : job.action === 'inbox' ? ['TRASH', 'SPAM'] : ['INBOX'],
+          removeLabels: job.action === 'read' ? ['UNREAD'] : job.action === 'unread' ? [] : job.action === 'inbox' ? ['TRASH', 'SPAM'] : job.action === 'trash' ? ['INBOX', 'SPAM'] : job.action === 'spam' ? ['INBOX', 'TRASH'] : ['INBOX'],
         })
         const reply = JSON.stringify(value)
         if (/"success":false/.test(reply)) {
@@ -1534,6 +1549,8 @@ export class GmailConnectorProvider {
 
   enqueueDraftSave(accountId: string, messageId: string, fields: DraftSaveFields, draftId?: string, clientDraftId?: string, seedOverride?: DraftProjection): DraftProjection {
     if (!accountId || !Object.keys(fields).length) throw new Error('Account and draft fields are required')
+    const identity = draftId ?? (clientDraftId ? `queued-${clientDraftId}` : '')
+    if (identity && [identity, this.#draftQueue.pendingRemote(accountId, identity)?.id, this.#draftQueue.origin(accountId, identity)].some(id => id && this.#sendFlights.has(`${accountId}:${id}`))) throw new Error('This message is already sending. Its submitted contents cannot be changed.')
     const accounts = this.cachedAccounts()
     if (accounts.length && !accounts.some(account => account.id === accountId)) throw new Error('Unknown Gmail account')
     if (seedOverride && seedOverride.accountId !== accountId) throw new Error('Draft baseline belongs to a different Gmail account')
@@ -1649,6 +1666,7 @@ export class GmailConnectorProvider {
   }
 
   async readGmailDraft(accountId: string, draftId: string, authoritative = false): Promise<DraftProjection> {
+    if (['accepted', 'verified'].includes(this.existingDraftSend(accountId, draftId)?.status ?? '')) throw Object.assign(new Error('This draft was sent.'), { code: 'gmail_draft_not_found' })
     if (this.#draftQueue.owns(accountId, draftId)) return this.#draftQueue.read(accountId, draftId)
     const key = `${accountId}:${draftId}`
     const request = ++this.#draftCacheSequence
@@ -1786,12 +1804,20 @@ export class GmailConnectorProvider {
 
   recordExternalSend(accountId: string, messageId: string, draftId?: string): SendReceipt {
     if (!accountId || !messageId) throw new Error('Account and Gmail message ID are required')
-    const existing = this.#local.receiptForMessage(accountId, messageId) ?? (draftId ? this.#local.receiptForDraft(accountId, draftId) : undefined)
+    const existing = this.#local.receiptForMessage(accountId, messageId) ?? (draftId ? this.existingDraftSend(accountId, draftId) : undefined)
     if (existing?.status === 'verified') return existing
     const now = new Date().toISOString()
     const receipt: SendReceipt = { id: existing?.id ?? randomUUID(), accountId, accountLabel: existing?.accountLabel ?? this.#index?.accounts().find(account => account.id === accountId)?.email ?? accountId, draftId, requestedAt: existing?.requestedAt ?? now, acceptedAt: now, ...existing, messageId, status: 'accepted', detailsSource: existing?.detailsSource ?? 'unavailable', error: undefined }
     this.#local.putReceipt(receipt)
+    if (draftId) {
+      for (const id of [draftId, this.#draftQueue.origin(accountId, draftId), this.#local.draftSave(accountId, draftId)?.remoteId]) {
+        if (!id) continue
+        this.#drafts.delete(`${accountId}:${id}`)
+        this.#local.removeDraft(accountId, id)
+      }
+    }
     void this.verifySendReceipt(receipt.id)
+    void this.#refreshIndexedDrafts(accountId)
     return receipt
   }
 
@@ -1806,36 +1832,92 @@ export class GmailConnectorProvider {
     const key = `${accountId}:${draftId}`
     const flight = this.#sendFlights.get(key)
     if (flight) return flight
-    const previous = this.#local.receiptForDraft(accountId, draftId)
-    if (previous && previous.status !== 'failed') return { structuredContent: { id: previous.messageId ?? null }, receipt: previous }
+    const previous = this.existingDraftSend(accountId, draftId)
+    if (previous) return { structuredContent: { id: previous.messageId ?? null }, receipt: previous }
     const operation = this.#sendWithReceipt(accountId, draftId)
     this.#sendFlights.set(key, operation)
     try { return await operation } finally { this.#sendFlights.delete(key) }
   }
 
-  async #sendWithReceipt(accountId: string, draftId: string): Promise<unknown> {
-    let receipt: SendReceipt = { id: randomUUID(), accountId, accountLabel: accountId, draftId, requestedAt: new Date().toISOString(), status: 'preparing', detailsSource: 'unavailable' }
+  backgroundSends(): SendReceipt[] {
+    const latest = new Map<string, SendReceipt>()
+    for (const receipt of this.#local.receipts()) {
+      if (!receipt.background) continue
+      const identity = receipt.draftId ? this.#draftQueue.origin(receipt.accountId, receipt.draftId) ?? receipt.draftId : receipt.id
+      const key = `${receipt.accountId}:${identity}`
+      if (!latest.has(key)) latest.set(key, receipt)
+    }
+    return [...latest.values()].filter(receipt => !['accepted', 'verified'].includes(receipt.status))
+  }
+  failedSendDraft(id: string): DraftProjection | undefined {
+    const receipt = this.#local.receipt(id)
+    if (!receipt?.draftId || !['failed', 'unknown'].includes(receipt.status)) return undefined
+    const job = this.#local.draftSave(receipt.accountId, receipt.draftId)
+    return job ? { ...job.draft, id: job.id, draftRevision: job.revision } : this.#local.draft(receipt.accountId, receipt.draftId)
+  }
+
+  existingDraftSend(accountId: string, draftId?: string, clientDraftId?: string): SendReceipt | undefined {
+    const identities = [draftId ? this.#local.draftSave(accountId, draftId)?.remoteId : undefined, clientDraftId ? `queued-${clientDraftId}` : undefined, draftId, draftId ? this.#draftQueue.origin(accountId, draftId) : undefined, draftId ? this.#draftQueue.pendingRemote(accountId, draftId)?.id : undefined]
+    const receipt = identities.flatMap(id => id ? [this.#local.receiptForDraft(accountId, id)] : []).filter((value): value is SendReceipt => Boolean(value)).sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))[0]
+    return receipt?.status !== 'failed' ? receipt : undefined
+  }
+
+  /** Persist one explicit send attempt before returning; Gmail work runs independently of the window. */
+  beginGmailDraftSend(accountId: string, draftId: string, expectedRevision?: number): SendReceipt {
+    if (!accountId || !draftId) throw new Error('Account and draft ID are required')
+    if (this.#actionsPaused || this.#stopped) throw new Error('Dispatch is updating. Your reply is kept; try Send again when the update finishes.')
+    const previous = this.existingDraftSend(accountId, draftId)
+    if (previous) return previous
+    const receipt: SendReceipt = { id: randomUUID(), accountId, accountLabel: this.cachedAccounts().find(account => account.id === accountId)?.email ?? accountId,
+      draftId, requestedAt: new Date().toISOString(), status: 'preparing', detailsSource: 'unavailable', background: true }
+    this.#local.putReceipt(receipt)
+    const key = `${accountId}:${draftId}`
+    const operation = this.#sendWithReceipt(accountId, draftId, receipt, expectedRevision)
+    this.#sendFlights.set(key, operation)
+    void operation.finally(() => { this.#sendFlights.delete(key) }).catch(error => console.error('Background send could not record its outcome:', error))
+    return receipt
+  }
+
+  async #sendWithReceipt(accountId: string, draftId: string, initial?: SendReceipt, expectedRevision?: number): Promise<unknown> {
+    let receipt: SendReceipt = initial ?? { id: randomUUID(), accountId, accountLabel: accountId, draftId, requestedAt: new Date().toISOString(), status: 'preparing', detailsSource: 'unavailable' }
     this.#local.putReceipt(receipt)
     try {
-      const draft = await this.readGmailDraft(accountId, draftId)
+      if (initial && (this.#draftQueue.owns(accountId, draftId) || this.#draftQueue.pendingRemote(accountId, draftId))) await this.#draftQueue.flushAccount(accountId)
+      // This exact revision was just read back and verified by the save worker.
+      // Reuse that confirmation rather than fetching the same draft again before Send.
+      const saved = expectedRevision === undefined ? undefined : this.#local.draftSave(accountId, draftId)
+      const draft = saved?.state === 'saved' && saved.revision === expectedRevision && saved.remoteId
+        ? { ...saved.draft, id: saved.remoteId, draftRevision: saved.revision }
+        : await this.readGmailDraft(accountId, draftId)
+      if (draft.syncState) throw new Error(draft.syncError || 'Gmail could not save this reply. Nothing was sent. Your reply is kept in Drafts.')
+      if (expectedRevision !== undefined && draft.draftRevision !== expectedRevision) throw new Error('This reply changed before sending. Nothing was sent; review it in Drafts.')
+      const remoteDraftId = draft.id
       const details: ReceiptDetails = { to: draft.to.map(item => item.address), cc: addressList(draft.cc ?? '').map(item => item.address), bcc: addressList(draft.bcc ?? '').map(item => item.address), subject: draft.subject, attachments: draft.attachments.map(item => ({ name: item.name, mediaType: item.mediaType, sizeLabel: item.sizeLabel })) }
       if (!details.to.length && !details.cc.length && !details.bcc.length) throw new Error('The saved Gmail draft has no recipients.')
-      receipt = { ...receipt, details, intended: details, detailsSource: 'draft', accountLabel: (await this.#account(accountId)).email || accountId, status: 'sending' }
+      const account = await this.#account(accountId)
+      if (expectedRevision !== undefined && this.#local.draftSave(accountId, draftId)?.revision !== expectedRevision) throw new Error('This reply changed before sending. Nothing was sent; review it in Drafts.')
+      receipt = { ...receipt, details, intended: details, detailsSource: 'draft', accountLabel: account.email || accountId, status: 'sending' }
       // Durable intent is recorded before the provider call. A restart makes it unknown, never a retry.
       this.#local.putReceipt(receipt)
-      const result = await this.#post('/v1/connectors/gmail/drafts/send', { linkId: accountId, draftId })
+      const result = await this.#post('/v1/connectors/gmail/drafts/send', { linkId: accountId, draftId: remoteDraftId })
       const messageId = text(structured(result).id)
       if (record(result)?.isError || structured(result).error || !messageId) throw new Error('Gmail did not return a confirmed sent message ID.')
       receipt = { ...receipt, messageId, status: 'accepted', acceptedAt: new Date().toISOString() }
-      this.#local.removeDraft(accountId, draftId)
+      for (const id of [draftId, remoteDraftId]) {
+        this.#drafts.delete(`${accountId}:${id}`)
+        this.#local.removeDraft(accountId, id)
+      }
+      if (draft.gmailMessageId) this.#index?.discardDraftMessages(accountId, [draft.gmailMessageId])
       if (!this.#stopped) {
         this.#local.putReceipt(receipt)
         void this.verifySendReceipt(receipt.id)
-        void this.#refreshIndexedDrafts()
+        void this.#refreshIndexedDrafts(accountId)
       }
       return { ...(record(result) ?? {}), receipt }
     } catch (error) {
-      receipt = { ...receipt, status: receipt.status === 'preparing' ? 'failed' : 'unknown', error: error instanceof Error ? error.message : String(error) }
+      const detail = error instanceof Error ? error.message : String(error)
+      const rejected = (error as { code?: unknown })?.code === 'gmail_backoff' || /token_revoked|HTTP status: (?:400|401|403|404)|request failed \((?:400|401|403|404)\)/i.test(detail)
+      receipt = { ...receipt, status: receipt.status === 'preparing' || rejected ? 'failed' : 'unknown', error: detail }
       if (!this.#stopped) this.#local.putReceipt(receipt)
       return { receipt }
     }

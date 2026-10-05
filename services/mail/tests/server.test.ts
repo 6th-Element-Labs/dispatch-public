@@ -654,3 +654,41 @@ it('reports whether a Gmail attachment is already cached without downloading it'
   expect(await status.json()).toEqual({ cached: false })
   expect(readAttachment).not.toHaveBeenCalled()
 })
+
+it('exports bounded work evidence from the exact account and refuses incomplete threads',async()=>{
+  const message={id:'m',threadId:'t',accountId:'a',sender:{name:'Jacob',address:'jacob@example.com',initials:'J'},subject:'Weekly',receivedAt:'2026-10-01T12:00:00Z',receivedLabel:'Oct 1',receivedFullLabel:'October 1',preview:'Proposal',unread:false,body:{kind:'sanitized-html' as const,content:'<p>I will send the proposal.</p>'},attachments:[],to:[{name:'Boss',address:'boss@example.com',initials:'B'}],source:'gmail' as const}
+  let complete=true
+  const base=await start({}, {accounts:async()=>[{id:'a',connectorId:'connector',name:'Gmail',email:'boss@example.com'}],readConversation:async()=>({...message,latestMessageId:'m',messageCount:1,messages:[message],completeness:{complete,knownCount:2,loadedCount:1}})})
+  const response=await fetch(base+'/v1/work/sources?account=a&thread=t');expect(response.status).toBe(200);expect(await response.json()).toMatchObject({sources:[{kind:'email',accountId:'a',messageId:'m',text:'I will send the proposal.',accountEmail:'boss@example.com'}]})
+  complete=false;expect((await fetch(base+'/v1/work/sources?account=a&thread=t')).status).toBe(409)
+})
+
+it('accepts an editor send snapshot immediately and exposes its background status without a provider send call', async () => {
+  const draft = projectDraft({ id: 'queued-snapshot', accountId: 'one', inReplyToMessageId: 'm1', to: [], subject: 'Reply', bodyMarkdown: 'Current text' })
+  const receipt = { id: 'attempt', accountId: 'one', accountLabel: 'work@example.com', draftId: draft.id, requestedAt: new Date().toISOString(), status: 'preparing' as const, detailsSource: 'unavailable' as const }
+  const enqueue = vi.fn(() => ({ ...draft, draftRevision: 7 }))
+  const begin = vi.fn(() => receipt)
+  const send = vi.fn(async () => { throw new Error('HTTP acceptance must not wait for delivery') })
+  const base = await start({}, { enqueueDraftSave: enqueue, beginGmailDraftSend: begin, sendGmailDraft: send, sendReceipt: id => id === receipt.id ? receipt : undefined })
+  const submit = (fields: object) => fetch(`${base}/v1/draft-sends`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fields) })
+  const accepted = await submit({ accountId: 'one', messageId: 'm1', to: 'recipient@example.com', bodyMarkdown: 'Current text' })
+  expect(accepted.status).toBe(202)
+  expect(await accepted.json()).toMatchObject({ receipt: { id: 'attempt', status: 'preparing' } })
+  expect(begin).toHaveBeenCalledWith('one', draft.id, 7)
+  expect(send).not.toHaveBeenCalled()
+  expect(await (await fetch(`${base}/v1/draft-sends/attempt`)).json()).toMatchObject({ receipt: { id: 'attempt' } })
+  expect((await submit({ accountId: 'one', to: '', bodyMarkdown: 'Do not send' })).status).toBe(400)
+  expect(enqueue).toHaveBeenCalledTimes(1)
+})
+
+it('reads a sent draft outcome through the mail owner without sending or fetching Gmail', async () => {
+  const receipt = { id: 'confirmed', accountId: 'one', accountLabel: 'test@example.com', draftId: 'gmail-remote', messageId: 'sent', status: 'verified' as const, requestedAt: new Date().toISOString(), detailsSource: 'sent-message' as const }
+  const lookup = vi.fn((accountId: string, draftId?: string) => accountId === 'one' && draftId === 'queued-alias' ? receipt : undefined)
+  const send = vi.fn(async () => { throw new Error('Status must never send') })
+  const base = await start({}, { existingDraftSend: lookup, sendGmailDraft: send })
+  expect(await (await fetch(base + '/v1/drafts/queued-alias/send-status?account=one')).json()).toMatchObject({ receipt: { messageId: 'sent', status: 'verified' } })
+  expect(await (await fetch(base + '/v1/drafts/queued-alias/send-status?account=other')).json()).toEqual({ receipt: null })
+  expect((await fetch(base + '/v1/drafts/queued-alias/send-status')).status).toBe(400)
+  expect(lookup).toHaveBeenCalledWith('one', 'queued-alias')
+  expect(send).not.toHaveBeenCalled()
+})

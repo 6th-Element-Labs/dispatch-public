@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dispatch.work-inputs.v1",
+  "title": "Dispatch work settings, transcript intake and briefing contracts",
+  "$defs": {
+    "settings": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "hour": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23
+        },
+        "minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 59
+        },
+        "days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "accounts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "maxItems": 100
+        },
+        "importantContacts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "email"
+          },
+          "maxItems": 100
+        },
+        "importantTopics": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "enabled",
+        "hour",
+        "minute",
+        "days",
+        "accounts",
+        "importantContacts",
+        "importantTopics"
+      ],
+      "additionalProperties": false
+    },
+    "transcript": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "importId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000000
+        },
+        "format": {
+          "enum": [
+            "txt",
+            "vtt",
+            "srt"
+          ]
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "email"
+          },
+          "maxItems": 100
+        },
+        "speakers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "format": "email"
+          }
+        }
+      },
+      "required": [
+        "accountId",
+        "importId",
+        "title",
+        "at",
+        "text",
+        "format",
+        "participants"
+      ],
+      "additionalProperties": false
+    },
+    "briefingOutput": {
+      "type": "object",
+      "properties": {
+        "lead": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1200
+              },
+              "itemIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "maxItems": 30,
+                "minItems": 1
+              }
+            },
+            "required": [
+              "text",
+              "itemIds"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 5
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "itemId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "section": {
+                "enum": [
+                  "attention",
+                  "updates",
+                  "waiting",
+                  "upcoming"
+                ]
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 800
+              }
+            },
+            "required": [
+              "itemId",
+              "section",
+              "text"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 80
+        }
+      },
+      "required": [
+        "lead",
+        "entries"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

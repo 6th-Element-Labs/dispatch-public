@@ -43,7 +43,7 @@ test.beforeEach(async ({ page }) => { await routeMailFixtures(page) })
 
 async function routeMailFixtures(page: Page) {
   // Unrouted calls fail as they do in CI, so a run never reaches the mail or agent service installed on this Mac.
-  await page.route(/^http:\/\/127\.0\.0\.1:(8411|8412)\//, route => route.abort('connectionrefused'))
+  await page.route(/^http:\/\/127\.0\.0\.1:(8411|8412|8413)\//, route => route.abort('connectionrefused'))
   await page.addInitScript(() => { localStorage.setItem('dispatch.setup.seen', '1') })
   await page.route(/8411\/v1\/mailboxes\/counts/, (route) => route.fulfill({ json: { source: 'demo', counts: { inbox: 0, drafts: 0, spam: 0 } } }))
   await page.route('http://127.0.0.1:8412/v1/activity', route => route.fulfill({ contentType: 'text/event-stream', body: 'data: []\n\n' }))
@@ -78,6 +78,11 @@ async function routeMailFixtures(page: Page) {
     const fields = await route.request().postDataJSON() as Record<string, unknown>
     const bodyMarkdown = String(fields.bodyMarkdown ?? '')
     await route.fulfill({ status: 202, json: { draft: draftProjectionFromCommand(fields, String(fields.draftId ?? 'd1'), bodyMarkdown || (fields.messageId ? 'Thanks.' : '')) } })
+  })
+  await page.route('http://127.0.0.1:8411/v1/draft-sends', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { sends: [] } })
+    const fields = route.request().postDataJSON()
+    await route.fulfill({ status: 202, json: { receipt: { id: 'send-default', accountId: fields.accountId, draftId: fields.draftId ?? 'd1', status: 'accepted', messageId: 'sent-default' } } })
   })
   await page.route('http://127.0.0.1:8411/v1/drafts/preview', async (route) => {
     const request = await route.request().postDataJSON() as { bodyMarkdown: string }
@@ -652,7 +657,6 @@ test('previews a new compose draft with account, Cc, and Bcc before saving', asy
   await page.getByRole('textbox', { name: 'Draft Bcc' }).fill('audit@example.com')
   await page.getByRole('textbox', { name: 'Draft subject' }).fill('Project update')
   await page.getByRole('textbox', { name: 'Draft body' }).fill('Draft preview')
-  await page.getByRole('button', { name: 'Save draft' }).click()
   await expect.poll(() => draftRequest).toEqual({ messageId: '', clientDraftId: expect.any(String), accountId: 'link-one', to: 'client@example.com', cc: 'cc@example.com', bcc: 'audit@example.com', subject: 'Project update', bodyMarkdown: 'Draft preview', attachments: [] })
 })
 
@@ -713,7 +717,7 @@ test('autosaves each saved-draft header and keeps the account locked', async ({ 
   })
   await page.goto('/')
   await page.getByRole('button', { name: 'Compose' }).click()
-  await page.getByRole('button', { name: 'Save draft' }).click()
+  await page.getByRole('textbox', { name: 'Draft body' }).fill('Initial saved text')
   await expect(page.getByRole('combobox', { name: 'Draft account' })).toBeDisabled()
 
   const changes: Array<[string, string, string]> = [
@@ -1246,7 +1250,9 @@ test('edits, saves, and sends a Gmail draft from the middle panel', async ({ pag
     const projection = draftProjectionFromCommand(fields, String(fields.draftId ?? 'draft-1'))
     await route.fulfill({ status: 202, json: { draft: { ...projection, inReplyToMessageId: 'm1', to: [messages[0]!.sender] } } })
   })
-  await page.route(/http:\/\/127\.0\.0\.1:8411\/v1\/drafts\/draft-1\?action=send.*/, async (route) => {
+  await page.route('http://127.0.0.1:8411/v1/draft-sends', async (route) => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { sends: [] } })
+    expect(route.request().postDataJSON()).toMatchObject({ to: 'ana@example.com', cc: 'manager@example.com', bcc: 'audit@example.com', bodyMarkdown: String.raw`\*\*Approved reply\*\*` })
     sendCount += 1
     await route.fulfill({ json: { receipt: { id: 'receipt-1', draftId: 'draft-1', accountId: 'link-one', accountLabel: 'work@example.com', messageId: 'sent-1', status: 'accepted', requestedAt: '2026-09-08T01:00:00Z', detailsSource: 'draft', details: { to: ['ana@example.com'], cc: ['manager@example.com'], bcc: ['audit@example.com'], subject: 'Re: Opua berth confirmation', attachments: [] } } } })
   })
@@ -1260,11 +1266,9 @@ test('edits, saves, and sends a Gmail draft from the middle panel', async ({ pag
   await page.getByRole('textbox', { name: 'Draft Cc' }).fill('manager@example.com')
   await page.getByRole('button', { name: 'Add Bcc', exact: true }).click()
   await page.getByRole('textbox', { name: 'Draft Bcc' }).fill('audit@example.com')
-  await page.getByRole('button', { name: 'Send draft' }).click()
-  await expect(page.getByRole('button', { name: 'Send now' })).toBeVisible()
-  await expect(page.locator('[data-send-confirm-text]')).toHaveText('To: ana@example.com\nCc: manager@example.com\nBcc: audit@example.com\nSubject: Re: Opua berth confirmation')
-  expect(sendCount).toBe(0)
-  await page.getByRole('button', { name: 'Send now' }).click()
+  await page.locator('[data-send-draft]').click()
+  await expect(page.locator('[data-send-confirm]')).toHaveCount(0)
+  await expect(page.locator('[data-draft]')).toBeHidden()
   await expect.poll(() => sendCount).toBe(1)
   await expect(page.locator('[data-receipts-dialog]')).toBeHidden()
 })
@@ -1778,7 +1782,7 @@ test('collapses an unsent draft without losing edits and gives space back to the
   await expect(page.locator('[data-draft] .card-header [data-recovery-status]')).toBeAttached()
   await expect(body).toBeHidden()
   await expect(page.getByRole('button', { name: 'Preview', exact: true })).toBeHidden()
-  await expect(page.getByRole('button', { name: 'Send draft', exact: true })).toBeHidden()
+  await expect(page.locator('[data-send-draft]')).toBeHidden()
   expect((await page.locator('[data-body]').boundingBox())!.height).toBeGreaterThan(before!.height)
   const expand = page.getByRole('button', { name: 'Expand draft', exact: true })
   await expand.focus(); await page.keyboard.press('Enter')
@@ -2087,7 +2091,6 @@ test('adds a recipient chip from mail autocomplete', async ({ page }) => {
   await page.getByRole('button', { name: 'Compose' }).click()
   await page.getByRole('textbox', { name: 'Draft recipient' }).fill('ana')
   await page.getByRole('option', { name: 'Ana Morales <ana@example.com>' }).click()
-  await page.getByRole('button', { name: 'Save draft' }).click()
   await expect.poll(() => draftRequest?.to).toBe('ana@example.com')
   await expect(page.getByRole('button', { name: 'Remove ana@example.com' })).toBeVisible()
 })
@@ -2365,7 +2368,7 @@ test('stale cached unread labels cannot reverse the toolbar or row styling', asy
   const summary = { ...conversations[0]!, accountId: 'link-one', accountLabel: 'work@example.com', unread: false }
   await stubGmailInbox(page, summary)
   await page.route(/8411\/v1\/conversations\/t1\?account=link-one/, route => route.fulfill({ json: { conversation: {
-    ...summary, unread: true, source: 'gmail', availability: { mode: 'downloaded', cachedAt: '2026-09-20T00:00:00Z' },
+    ...summary, latestMessageId: 'sent-reply', unread: true, source: 'gmail', availability: { mode: 'downloaded', cachedAt: '2026-09-20T00:00:00Z' },
     messages: [{ ...messages[0]!, accountId: 'link-one', source: 'gmail', unread: true, body: { kind: 'plain-text', content: 'Saved body with old labels' }, attachments: [] }],
   } } }))
   const writes: unknown[] = []
@@ -2632,7 +2635,7 @@ test('cached draft opens immediately and a late refresh cannot overwrite newer e
   await page.goto('/')
   await page.getByRole('button', { name: 'Drafts', exact: true }).click()
   await expect(page.getByLabel('Draft body')).toHaveText('Stored content')
-  await expect(page.locator('[data-send-draft]')).toBeDisabled()
+  await expect(page.locator('[data-send-draft]')).toBeEnabled()
   await expect.poll(() => Boolean(refreshing)).toBe(true)
   await page.getByLabel('Draft body').fill('My newer edit')
   await refreshing!.fulfill({ json: { draft: { ...draft, cachedAt: undefined, bodyMarkdown: 'Remote older version' } } })
@@ -2822,8 +2825,10 @@ for (const hasRecipient of [true, false]) {
     const writes: string[] = []
     const draft = { id: 'send-existing', accountId: 'account-A', inReplyToMessageId: 'm1', to: hasRecipient ? [messages[0]!.sender] : [], cc: '', bcc: '', subject: 'Existing draft', bodyMarkdown: 'Read-only projection', bodyHtml: '<p>Original HTML</p>', bodyText: 'Read-only projection', attachments: [], state: 'draft' }
     await page.route('http://127.0.0.1:8411/v1/drafts', route => route.fulfill({ json: { draft } }))
-    await page.route(/8411\/v1\/drafts\/send-existing/, route => {
-      writes.push(route.request().method() + ':' + new URL(route.request().url()).searchParams.get('action'))
+    await page.route('http://127.0.0.1:8411/v1/draft-sends', route => {
+      if (route.request().method() === 'GET') return route.fulfill({ json: { sends: [] } })
+      writes.push(route.request().method() + ':send')
+      expect(route.request().postDataJSON()).not.toHaveProperty('bodyMarkdown')
       return route.fulfill({ json: route.request().method() === 'PUT' ? { draft } : { delivery: { id: 'sent-message' } } })
     })
     await page.goto('/')
@@ -2831,11 +2836,10 @@ for (const hasRecipient of [true, false]) {
     await expect(page.locator('[data-draft-body]')).toHaveText('Read-only projection')
     await page.locator('[data-send-draft]').click()
     if (hasRecipient) {
-      await page.locator('[data-send-confirm-go]').click()
       await expect.poll(() => writes).toEqual(['POST:send'])
     } else {
       await expect(page.locator('[data-draft-error]')).toContainText('Add a recipient')
-      await expect(page.locator('[data-send-confirm]')).toBeHidden()
+      await expect(page.locator('[data-send-confirm]')).toHaveCount(0)
       expect(writes).toEqual([])
     }
   })
@@ -3041,7 +3045,6 @@ test('resolves only the affected draft inline and keeps typing made while choosi
   await page.getByRole('button', { name: 'Compose', exact: true }).click()
   await page.getByRole('textbox', { name: 'Draft subject' }).fill('Local subject')
   await page.getByRole('textbox', { name: 'Draft body' }).fill('Local version')
-  await page.getByRole('button', { name: 'Save draft' }).click()
   await expect(page.locator('[data-draft-conflict]')).toBeVisible()
   await expect(page.locator('[data-draft-conflict-summary]')).toContainText('subject, message')
   await expect(page.locator('[data-draft-conflict-remote]')).toContainText('Remote Gmail text')
@@ -3084,7 +3087,6 @@ test('keeps typing made during Keep my edits and accepts a follow-up save', asyn
   await page.goto('/')
   await page.getByRole('button', { name: 'Compose', exact: true }).click()
   await page.getByRole('textbox', { name: 'Draft body' }).fill('My edits')
-  await page.getByRole('button', { name: 'Save draft' }).click()
   await expect(page.locator('[data-draft-conflict]')).toBeVisible()
   await page.getByRole('button', { name: 'Keep my edits' }).click()
   await expect.poll(() => Boolean(resolution)).toBe(true)
@@ -3126,14 +3128,12 @@ test('keeps a saved Codex attachment during stale queued-editor saves and permit
   await page.getByRole('button', { name: 'Compose', exact: true }).click()
   await expect(page.locator('[data-draft]')).toBeVisible()
   await page.getByRole('textbox', { name: 'Draft body' }).fill('Before append')
-  await page.getByRole('button', { name: 'Save draft' }).click()
   await expect.poll(() => commands.length).toBe(1)
   expect(commands[0]?.body).toMatchObject({ bodyMarkdown: 'Before append', attachments: [] })
 
   // The Codex attachment append completes remotely while this editor still has the older file list.
   remoteAppendReady = true
   await page.getByRole('textbox', { name: 'Draft body' }).fill('After append')
-  await page.getByRole('button', { name: 'Save draft' }).click()
   await expect.poll(() => Boolean(commands[1]?.route)).toBe(true)
   expect(commands[1]?.body).toMatchObject({
     draftId: 'queued-append-race', bodyMarkdown: 'After append',
@@ -3177,7 +3177,6 @@ test('removing a visible pending append uses only the observed attachment baseli
   await page.getByRole('button', { name: 'Compose', exact: true }).click()
   await expect(page.locator('[data-draft]')).toBeVisible()
   await page.getByRole('textbox', { name: 'Draft body' }).fill('Before append')
-  await page.getByRole('button', { name: 'Save draft' }).click()
   await expect.poll(() => commands.length).toBe(1)
 
   await page.locator('[data-draft-files]').setInputFiles({ name: 'pending.txt', mimeType: 'text/plain', buffer: Buffer.from('file bytes') })
@@ -3260,7 +3259,6 @@ test('keeps a new draft and says so when Discard follows a save Gmail may have c
   await page.goto('/')
   await page.getByRole('button', { name: 'Compose', exact: true }).click()
   await page.locator('[data-draft-body]').fill('Maybe saved')
-  await page.locator('[data-save-draft]').click()
   await expect.poll(() => Boolean(pendingCreate)).toBe(true)
   await page.locator('[data-discard-draft]').click()
   await pendingCreate!.fulfill({ status: 504, json: { error: 'gmail_draft_create_failed', detail: 'Timed out waiting for Gmail.' } })
@@ -3307,21 +3305,22 @@ test('keeps a newer recovery copy while an older Gmail save is pending', async (
   await page.route('http://127.0.0.1:8411/v1/draft-saves', route => { pending = route })
   await page.goto('/'); await page.getByRole('button', { name: 'Compose', exact: true }).click()
   await page.locator('[data-draft-body]').fill('Older text')
-  await page.locator('[data-save-draft]').click(); await expect.poll(() => Boolean(pending)).toBe(true)
+  await expect.poll(() => Boolean(pending)).toBe(true)
   await page.locator('[data-draft-body]').fill('Newer text')
   await pending!.fulfill({ json: { draft: { id: 'saved', accountId: 'one', inReplyToMessageId: '', to: [], subject: '', bodyMarkdown: 'Older text', bodyText: 'Older text', bodyHtml: '<p>Older text</p>', attachments: [], state: 'draft' } } })
   await expect(page.locator('[data-draft-body]')).toHaveText('Newer text')
   expect((await localRecovery(page))[0]?.bodyMarkdown).toBe('Newer text')
 })
 
-test('keeps sending quiet and locks edits until Gmail responds', async ({ page }) => {
+test('Send closes the editor immediately while Gmail is still responding', async ({ page }) => {
   const draft = { id: 'd-receipt', accountId: 'one', inReplyToMessageId: 'm1', to: [messages[0]!.sender], cc: '', bcc: '', subject: 'Delivery', bodyMarkdown: 'Hello', bodyText: 'Hello', bodyHtml: '<p>Hello</p>', attachments: [], state: 'draft' }
   let pending: import('@playwright/test').Route | undefined
   await page.route('http://127.0.0.1:8411/v1/drafts', route => route.fulfill({ json: { draft } }))
-  await page.route(/8411\/v1\/drafts\/d-receipt/, route => { pending = route })
+  await page.route('http://127.0.0.1:8411/v1/draft-sends', route => { if (route.request().method() === 'GET') return route.fulfill({ json: { sends: [] } }); pending = route })
   await page.goto('/'); await page.getByRole('button', { name: 'Reply', exact: true }).click()
-  await page.locator('[data-send-draft]').click(); await page.locator('[data-send-confirm-go]').click()
-  await expect(page.locator('[data-draft-body]')).toBeDisabled()
+  await page.locator('[data-send-draft]').click()
+  await expect(page.locator('[data-draft]')).toBeHidden()
+  await expect(page.locator('[data-send-status]')).toContainText('Sending')
   await expect.poll(() => Boolean(pending)).toBe(true)
   await pending!.fulfill({ json: { receipt: { id: 'receipt-proof', accountId: 'one', accountLabel: 'work@example.com', draftId: draft.id, messageId: 'provider-id', status: 'verified', requestedAt: '2026-09-08T01:00:00Z', detailsSource: 'sent-message', details: { to: ['ana@example.com'], cc: ['cc@example.com'], bcc: ['audit@example.com'], subject: 'Delivery', attachments: [{ name: 'contract.pdf', mediaType: 'application/pdf', sizeLabel: '10 KB' }] } } } })
   await expect(page.locator('[data-receipts-dialog]')).toHaveCount(0)
@@ -3933,7 +3932,7 @@ for (const dirty of [false, true]) test(`Codex's durable draft opens pending and
   await page.evaluate(draft => (window as any).queueEvents.onmessage({ data: JSON.stringify({ method: 'item/completed', params: { item: { type: 'mcpToolCall', server: 'dispatch_mail', tool: 'create_draft', status: 'completed', result: { structuredContent: { draft } } } } }) }), pendingDraft)
   await expect(page.locator('[data-draft-body]')).toHaveText('AI draft text')
   await expect(page.locator('[data-recovery-status]')).toHaveText('Saved · waiting to sync')
-  await expect(page.locator('[data-send-draft]')).toBeDisabled()
+  await expect(page.locator('[data-send-draft]')).toBeEnabled()
   confirmed = true
   if (dirty) {
     await expect.poll(() => Boolean(confirmingRead), { timeout: 8000 }).toBe(true)
@@ -3980,7 +3979,6 @@ test('rich draft formatting survives saving and reopening', async ({ page }) => 
   await page.getByRole('textbox', { name: 'Link URL' }).fill('https://example.com/review')
   await page.getByRole('button', { name: 'Apply link', exact: true }).click()
   await expect(body.locator('a')).toHaveAttribute('href', 'https://example.com/review')
-  await page.getByRole('button', { name: 'Save draft', exact: true }).click()
   await expect.poll(() => String(saved.at(-1)?.bodyMarkdown)).toBe('**[Formatted words](https://example.com/review)**')
   expect(String(saved.at(-1)?.bodyMarkdown)).toContain('https://example.com/review')
   await page.route('http://127.0.0.1:8411/v1/drafts/open', route => route.fulfill({ json: { draft: draftProjectionFromCommand(saved.at(-1)!, 'rich-one') } }))
@@ -4227,4 +4225,252 @@ test('Codex single-row footer keeps permissions and Stop visible in a narrow pan
   await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible()
   await expect(page.locator('[data-stop-icon]')).toHaveClass('ti ti-player-stop')
   await expect(page.locator('.dispatch-agent-header').getByRole('button', { name: 'Codex settings' })).toBeVisible()
+})
+
+test('To-dos carries work across threads, preserves edits, and keeps mail actions scoped', async ({page}) => {
+  await stubAgent(page)
+  const bindings:Record<string,unknown>[]=[]
+  await page.route('http://127.0.0.1:8412/v1/threads/bindings',async route=>{const body=route.request().postDataJSON();bindings.push(body);await route.fulfill({json:{binding:{threadId:`work-${body.kind}-${body.contextId??body.gmailThreadId??'general'}`,created:false,replaced:false}}})})
+  const source={id:'source',kind:'email',accountId:'demo',threadId:'t1',messageId:'m1',title:'Weekly delivery review',at:'2026-10-01T10:00:00Z',author:'jacob@example.com',participants:['jacob@example.com','steve@example.com'],text:''}
+  const item={id:'abc123',accountId:'demo',kind:'task',title:'Confirm the revised delivery date',summary:'Jacob is checking the revised delivery date. This remains open from last week.',topic:'September delivery',topicId:'topic123',contacts:['jacob@example.com'],owner:'jacob@example.com',due:'2026-10-05',status:'waiting',certainty:'explicit',snoozedUntil:null,revision:1,reason:'Waiting for Jacob',evidence:[{source,quote:'I will confirm the revised delivery date.'},{source:{...source,id:'discussion',kind:'codex',codexThreadId:'older-chat'},quote:'Keep the agreed delivery window.'}]}
+  const decision={...item,id:'decision123',kind:'decision',title:'Keep the agreed delivery window',summary:'The delivery window carries forward into the next weekly review.'}
+  await page.route('http://127.0.0.1:8413/**',async route=>{
+    const url=new URL(route.request().url())
+    if(route.request().method()==='POST'&&url.pathname.endsWith('abc123')){Object.assign(item,route.request().postDataJSON(),{revision:item.revision+1});await route.fulfill({json:{item}});return}
+    if(url.pathname.includes('/items/')){await route.fulfill({json:{item,history:[]}});return}
+    const filter=url.searchParams.get('filter')??'all'
+    const visible=filter==='done'?item.status==='done':filter==='snoozed'?item.status==='snoozed':!['done','snoozed','dismissed'].includes(item.status)
+    await route.fulfill({json:{items:visible?[item]:[],decisions:[decision],people:['jacob@example.com'],topics:[{id:'topic123',name:'September delivery',accountId:'demo'}],scan:{enabled:true,running:false,scanned:30,total:30,depth:30,lastScan:'2026-10-02T10:00:00Z',error:null,failures:0}}})
+  })
+  let mailMutations=0
+  page.on('request',request=>{if(request.method()==='POST'&&/8411.*\/actions/.test(request.url()))mailMutations++})
+  await page.goto('/')
+  await page.locator('.dispatch-rail [data-work-nav="todos"]').click()
+  await expect(page.getByRole('heading',{name:'Work that stays with you'})).toBeVisible()
+  await expect(page.getByRole('heading',{name:item.title,exact:true})).toBeVisible()
+  await expect(page.getByText('Source trail')).toBeVisible()
+  await expect.poll(()=>bindings.some(b=>b.kind==='topic'&&b.contextId==='topic123')).toBe(true)
+  await page.getByRole('button',{name:'Contact context',exact:true}).click()
+  item.summary += ' Latest update from this week.'
+  await expect(page.locator('.work-summary')).toContainText('Latest update from this week.',{timeout:7000})
+  await expect(page.getByRole('button',{name:'Contact context',exact:true})).toHaveAttribute('aria-pressed','true')
+  await page.keyboard.press('Backspace');await page.keyboard.press('e')
+  expect(mailMutations).toBe(0)
+  await page.locator('[data-work="contact"]').click()
+  await expect.poll(()=>bindings.some(b=>b.kind==='contact'&&b.contextId==='jacob@example.com')).toBe(true)
+  await page.locator('[data-work="source"]').nth(1).click()
+  await expect(page.getByText('History for older-chat')).toBeVisible()
+  await page.getByRole('textbox',{name:'Ask Codex'}).fill('Continue this discussion')
+  await expect(page.locator('[data-send]')).toBeDisabled()
+  await page.getByRole('button',{name:'Contact context',exact:true}).click()
+  await expect(page.getByText('History for work-contact-jacob%40example.com')).toBeVisible()
+  await expect(page.locator('[data-send]')).toBeEnabled()
+  await page.getByText('Edit details',{exact:true}).click()
+  await page.locator('[data-work-edit] input[name="title"]').fill('Confirm delivery with Jacob')
+  await page.getByRole('button',{name:'Save changes',exact:true}).click()
+  await expect(page.getByRole('heading',{name:'Confirm delivery with Jacob',exact:true})).toBeVisible()
+  await page.locator('[data-work="status"][data-value="done"]').click()
+  await page.locator('[data-work="filter"][data-value="done"]').click()
+  await expect(page.getByRole('heading',{name:'Confirm delivery with Jacob',exact:true})).toBeVisible()
+  await page.reload()
+  await page.locator('.dispatch-rail [data-work-nav="todos"]').click()
+  await page.locator('[data-work="filter"][data-value="done"]').click()
+  await expect(page.getByRole('heading',{name:'Confirm delivery with Jacob',exact:true})).toBeVisible()
+  await page.locator('[data-work="status"][data-value="open"]').click()
+  await page.locator('[data-work="filter"][data-value="all"]').click()
+  await page.getByRole('button',{name:'Snooze',exact:true}).click()
+  await page.locator('[data-work="filter"][data-value="snoozed"]').click()
+  await expect(page.getByRole('heading',{name:'Confirm delivery with Jacob',exact:true})).toBeVisible()
+  await page.screenshot({path:resolve('test-results','ea-todos.png'),fullPage:true})
+  await page.locator('[data-work="source"]').first().click()
+  await expect(page.getByRole('button',{name:'← Back to work'})).toBeVisible()
+  await expect(page.locator('[data-reader]')).toBeVisible()
+  await page.getByRole('button',{name:'← Back to work'}).click()
+  await expect(page.getByRole('heading',{name:'Work that stays with you'})).toBeVisible()
+  await page.locator('.dispatch-rail [data-mailbox="inbox"]').click()
+  await expect(page.locator('.dispatch-work-detail')).toBeHidden()
+})
+
+test('work controls stay visible above a long email and Contact follows the latest selection', async ({page}) => {
+  await stubAgent(page)
+  const bindings: Record<string,unknown>[]=[]
+  await page.route('http://127.0.0.1:8412/v1/threads/bindings',async route=>{const body=route.request().postDataJSON();bindings.push(body);await route.fulfill({json:{binding:{threadId:'scoped-chat',created:false,replaced:false}}})})
+  await page.route(/http:\/\/127\.0\.0\.1:8411\/v1\/conversations\/(.+)/,route=>{
+    const thread=new URL(route.request().url()).pathname.split('/').pop()
+    const summary=conversations.find(c=>c.threadId===thread)!
+    const message={...messages.find(m=>m.threadId===thread)!,accountId:'demo',source:'demo',body:{kind:'sanitized-html',content:'<p>Long email paragraph.</p>'.repeat(80)},attachments:[]}
+    return route.fulfill({json:{conversation:{...summary,accountId:'demo',source:'demo',messages:[message]}}})
+  })
+  await page.goto('/')
+  const review=page.getByRole('button',{name:'Find to-dos in this thread',exact:true})
+  await expect(review).toBeVisible()
+  await expect(review).toBeInViewport()
+  expect(await page.locator('.dispatch-reader-header').getByRole('button',{name:'Find to-dos in this thread'}).count()).toBe(1)
+  await page.getByRole('button',{name:'Contact context',exact:true}).click()
+  await expect.poll(()=>bindings.some(b=>b.kind==='contact'&&b.contextId==='ana@example.com')).toBe(true)
+  await page.locator('[data-conversation-id="demo:t2"]').click()
+  await expect(page.locator('.dispatch-reader-subject')).toHaveText('Services agreement')
+  await page.getByRole('button',{name:'Contact context',exact:true}).click()
+  await expect.poll(()=>bindings.some(b=>b.kind==='contact'&&b.contextId==='james@example.com')).toBe(true)
+  await expect(review).toBeInViewport()
+})
+
+for (const navigate of [false, true]) {
+  test(`failed Send keeps the exact reply${navigate ? ' without replacing a newer compose' : ' and reopens it'}`, async ({ page }) => {
+    await page.route('http://127.0.0.1:8411/v1/accounts', route => route.fulfill({ json: { accounts: [{ id: 'demo', email: 'work@example.com', name: 'Work', connectorId: 'gmail' }] } }))
+    let resolveStatus!: () => void
+    const gate = new Promise<void>(resolve => { resolveStatus = resolve })
+    await page.route('http://127.0.0.1:8411/v1/draft-sends', async route => {
+      if (route.request().method() === 'GET') return route.fulfill({ json: { sends: [] } })
+      expect(route.request().postDataJSON()).toMatchObject({ bodyMarkdown: 'Send exactly this reply' })
+      return route.fulfill({ status: 202, json: { receipt: { id: 'pending-send', accountId: 'demo', status: 'preparing' } } })
+    })
+    await page.route('http://127.0.0.1:8411/v1/draft-sends/pending-send', async route => {
+      await gate
+      return route.fulfill({ json: { receipt: { id: 'pending-send', accountId: 'demo', status: 'failed', error: 'Gmail unavailable. Nothing was sent.' } } })
+    })
+    await page.route('http://127.0.0.1:8411/v1/drafts', route => route.fulfill({ json: { draft: { ...draftProjectionFromCommand({ accountId: 'demo', to: 'ana@example.com', subject: 'Reply' }, 'd1') } } }))
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Reply', exact: true }).click()
+    await page.locator('[data-draft-body]').fill('Send exactly this reply')
+    await page.locator('[data-send-draft]').click()
+    await expect(page.locator('[data-draft]')).toBeHidden()
+    if (navigate) {
+      await page.getByRole('button', { name: 'Compose', exact: true }).click()
+      await page.locator('[data-draft-body]').fill('A completely different email')
+    }
+    resolveStatus()
+    await expect(page.locator('[data-send-status]')).toBeHidden()
+    await expect(page.locator('[data-draft-body]')).toHaveText(navigate ? 'A completely different email' : 'Send exactly this reply')
+    await expect(page.locator(navigate ? '[data-mail-error]' : '[data-draft-error]')).toContainText('Nothing was sent')
+  })
+}
+
+test('reply Send handles a locally queued autosave without requiring Save or a second confirmation', async ({ page }) => {
+  await page.route('http://127.0.0.1:8411/v1/draft-saves', async route => {
+    const fields = route.request().postDataJSON()
+    await route.fulfill({ status: 202, json: { draft: { ...draftProjectionFromCommand(fields, 'queued-123'), syncState: 'pending' } } })
+  })
+  let sends = 0
+  await page.route('http://127.0.0.1:8411/v1/draft-sends', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { sends: [] } })
+    sends++
+    expect(route.request().postDataJSON()).toMatchObject({ draftId: 'queued-123' })
+    return route.fulfill({ status: 202, json: { receipt: { id: 'one-send', accountId: 'demo', status: 'accepted' } } })
+  })
+  await page.route('http://127.0.0.1:8411/v1/drafts/queued-123?account=demo', route => route.fulfill({ json: { draft: { ...draftProjectionFromCommand({ accountId: 'demo', to: 'ana@example.com', bodyMarkdown: 'Queued reply' }, 'queued-123'), syncState: 'pending', syncError: 'Gmail is saving this reply' } } }))
+  await page.route('http://127.0.0.1:8411/v1/drafts', route => route.fulfill({ json: { draft: { ...draftProjectionFromCommand({ accountId: 'demo', to: 'ana@example.com', subject: 'Reply' }, 'd1') } } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Reply', exact: true }).click()
+  await page.locator('[data-draft-body]').fill('Queued reply')
+  // Demo saves use their direct path; return a pending projection there too.
+  await page.route(/8411\/v1\/drafts\/d1/, route => route.fulfill({ json: { draft: { ...draftProjectionFromCommand({ accountId: 'demo', to: 'ana@example.com', bodyMarkdown: 'Queued reply' }, 'queued-123'), syncState: 'pending', syncError: 'Gmail is saving this reply' } } }))
+  await expect(page.locator('[data-recovery-status]')).toHaveText('Gmail is saving this reply')
+  await expect(page.locator('[data-send-draft]')).toBeEnabled()
+  await expect(page.locator('[data-save-draft], [data-send-confirm]')).toHaveCount(0)
+  await page.locator('[data-send-draft]').click()
+  await expect(page.locator('[data-draft]')).toBeHidden()
+  await expect.poll(() => sends).toBe(1)
+})
+
+test('a successfully sent new compose stays closed when there is no selected thread to refresh', async ({ page }) => {
+  await page.route('http://127.0.0.1:8411/v1/accounts', route => route.fulfill({ json: { accounts: [{ id: 'demo', email: 'work@example.com', name: 'Work', connectorId: 'gmail' }] } }))
+  let sends = 0
+  await page.route('http://127.0.0.1:8411/v1/draft-sends', route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { sends: [] } })
+    sends++
+    expect(route.request().postDataJSON()).toMatchObject({ to: 'ana@example.com', subject: 'New message', bodyMarkdown: 'Send this new message once' })
+    return route.fulfill({ status: 202, json: { receipt: { id: 'compose-send', accountId: 'demo', status: 'preparing' } } })
+  })
+  await page.route('http://127.0.0.1:8411/v1/draft-sends/compose-send', route => route.fulfill({ json: { receipt: { id: 'compose-send', accountId: 'demo', status: 'accepted', messageId: 'sent-new-message' } } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Compose', exact: true }).click()
+  await page.locator('[data-draft-to]').fill('ana@example.com')
+  await page.locator('[data-draft-subject]').fill('New message')
+  await page.locator('[data-draft-body]').fill('Send this new message once')
+  await page.locator('[data-send-draft]').click()
+  await expect(page.locator('[data-draft]')).toBeHidden()
+  await expect(page.locator('[data-send-status]')).toBeHidden()
+  await expect(page.locator('[data-draft]')).toBeHidden()
+  await expect(page.locator('[data-draft-error]')).toBeHidden()
+  expect(await localRecovery(page)).toHaveLength(0)
+  expect(sends).toBe(1)
+})
+
+test('a new unread message releases the prior read override and agrees with the Inbox badge', async ({ page }) => {
+  await page.clock.install()
+  let first = { ...conversations[0]!, accountId: 'link-one', unread: true }
+  const second = { ...conversations[1]!, accountId: 'link-one', unread: true }
+  let count = 2
+  await stubGmailInbox(page, first)
+  await page.route(/8411\/v1\/conversations\?/, route => route.fulfill({ json: { source: 'gmail', conversations: [first, second] } }))
+  await page.route(/8411\/v1\/mailboxes\/counts/, route => route.fulfill({ json: { counts: { inbox: count, drafts: 0, spam: 0 } } }))
+  await page.route(/8411\/v1\/conversations\/t1\?/, route => route.fulfill({ json: { conversation: { ...first, source: 'gmail', messages: [{ ...messages[0]!, id: first.latestMessageId, accountId: 'link-one', source: 'gmail', body: { kind: 'plain-text', content: 'Latest body' }, attachments: [] }] } } }))
+  await page.route(/8411\/v1\/conversations\/t1\/read-state/, route => { count = 1; return route.fulfill({ json: { accepted: true } }) })
+  await page.route('http://127.0.0.1:8411/v1/sync', route => route.fulfill({ json: { sync: { state: 'ready', messageCount: 2 } } }))
+  await page.goto('/')
+  await expect(page.getByText('Latest body', { exact: true })).toBeVisible()
+  await page.locator('[data-conversation-id="demo:t1"]').click()
+  await page.clock.fastForward(5000)
+  await expect(page.locator('[data-conversation-id="demo:t1"]')).not.toHaveClass(/dispatch-message-unread/)
+  await expect(page.locator('[data-mailbox-count="inbox"]').last()).toHaveText('1')
+  await page.locator('[data-conversation-id="demo:t2"]').click()
+  first = { ...first, latestMessageId: 'new-arrival', unread: true, receivedAt: '2026-10-05T01:00:00Z' }; count = 2
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+  await expect(page.locator('[data-conversation-id="demo:t1"]')).toHaveClass(/dispatch-message-unread/)
+  await expect(page.locator('.dispatch-message-unread')).toHaveCount(2)
+  await expect(page.locator('[data-mailbox-count="inbox"]').last()).toHaveText('2')
+})
+
+for (const scenario of ['clean', 'late-edit', 'different-draft', 'without-tool-event']) test(`confirmed agent Send reconciles queued aliases safely (${scenario})`, async ({ page }) => {
+  await page.clock.install()
+  await page.addInitScript(() => {
+    class FakeEvents { static CLOSED = 2; readyState = 1; onopen: any; onmessage: any; onerror: any; constructor() { (window as any).sendEvents = this; setTimeout(() => this.onopen?.({}), 0) } close() { this.readyState = 2 } }
+    ;(window as any).EventSource = FakeEvents
+  })
+  await stubAgent(page)
+  await page.route('http://127.0.0.1:8411/v1/accounts', route => route.fulfill({ json: { accounts: [{ id: 'one', name: 'Test', email: 'test@example.com' }] } }))
+  const draft = { id: 'queued-alias', accountId: 'one', inReplyToMessageId: '', to: [{ name: 'Test', address: 'test@example.com', initials: 'T' }], subject: 'Already sent', cc: '', bcc: '', bodyMarkdown: 'Original draft', bodyText: 'Original draft', bodyHtml: '', attachments: [], state: 'draft' }
+  await page.route(/8411\/v1\/drafts\/queued-alias\?/, route => route.fulfill({ json: { draft } }))
+  let held: import('@playwright/test').Route | undefined
+  await page.route(/8411\/v1\/drafts\/queued-alias\/send-status/, route => { held = route })
+  await page.goto('/')
+  await expect(page.locator('[data-agent-status]')).toHaveAttribute('data-status', 'Connected')
+  await page.evaluate(draft => (window as any).sendEvents.onmessage({ data: JSON.stringify({ method: 'item/completed', params: { item: { type: 'mcpToolCall', server: 'dispatch_mail', tool: 'create_draft', status: 'completed', result: { structuredContent: { draft } } } } }) }), draft)
+  await expect(page.locator('[data-draft-body]')).toHaveText('Original draft')
+  if (scenario === 'without-tool-event') await page.clock.fastForward(5000)
+  else await page.evaluate(() => (window as any).sendEvents.onmessage({ data: JSON.stringify({ method: 'item/completed', params: { item: { type: 'mcpToolCall', server: 'gmail', tool: 'gmail.send_draft', arguments: { link_id: 'one', draft_id: 'gmail-remote' }, status: 'completed', result: { structuredContent: { id: 'sent-id' } } } } }) }))
+  await expect.poll(() => Boolean(held)).toBe(true)
+  if (scenario === 'late-edit') await page.locator('[data-draft-body]').fill('Keep my later edit')
+  if (scenario === 'different-draft') { await page.getByRole('button', { name: 'Compose', exact: true }).click(); await page.locator('[data-draft-body]').fill('Different message') }
+  await held!.fulfill({ json: { receipt: { id: 'confirmed', accountId: 'one', draftId: 'gmail-remote', status: 'verified', messageId: 'sent-id' } } })
+  if (scenario === 'late-edit' || scenario === 'different-draft') await expect(page.locator('[data-draft-body]')).toHaveText(scenario === 'late-edit' ? 'Keep my later edit' : 'Different message')
+  else await expect(page.locator('[data-draft]')).toBeHidden()
+})
+
+test('EA shows a fixed newspaper with separate later updates and dated history',async({page})=>{
+ await stubAgent(page)
+ const source={id:'mail-source',kind:'email',accountId:'demo',threadId:'t1',messageId:'m1',title:'Delivery update',at:'2026-10-05T08:00:00Z',author:'jacob@example.com',participants:['jacob@example.com'],text:''}
+ const item={id:'ea123',accountId:'demo',accountEmail:'steve@example.com',kind:'task',title:'Confirm delivery',summary:'Delivery needs confirmation.',topic:'Proposal',topicId:'topic123',contacts:['jacob@example.com'],owner:'jacob@example.com',due:'2026-10-09',status:'waiting',certainty:'explicit',snoozedUntil:null,revision:1,updatedAt:'2026-10-05T08:00:00Z',evidence:[{source,quote:'I will confirm delivery.'}]}
+ const settings={enabled:true,hour:8,minute:0,days:90,accounts:[],importantContacts:[],importantTopics:[]}
+ const coverage={scope:'indexed',from:'2026-07-07T08:00:00Z',discovered:10,reviewed:10,pending:0,failed:0,ingestionAt:'2026-10-05T08:00:00Z',mailSyncAt:'2026-10-05T08:00:00Z',mailState:'ready',caughtUp:true,complete:true}
+ const edition={id:'edition1',date:'2026-10-05',revision:1,preparedAt:'2026-10-05T08:00:00Z',cutoff:'2026-10-05T08:00:00Z',timezone:'Pacific/Fiji',items:[structuredClone(item)],coverage,selection:{total:1,included:1},content:{lead:[{text:'Delivery confirmation needs attention before Friday.',itemIds:[item.id]}],entries:[{itemId:item.id,section:'waiting',text:'Jacob owes the delivery confirmation.'}]}}
+ await page.route('http://127.0.0.1:8413/**',async route=>{
+  const url=new URL(route.request().url());if(url.pathname.includes('/items/'))return route.fulfill({json:{item,history:[]}})
+  if(url.pathname==='/v1/work/briefing')return route.fulfill({json:{edition,editions:[{id:edition.id,date:edition.date,revision:1,preparedAt:edition.preparedAt}],since:item.status==='done'?[item]:[],coverage,status:{running:false,error:null}}})
+  return route.fulfill({json:{items:item.status==='done'?[]:[item],decisions:[],updates:[],people:item.contacts,topics:[{id:item.topicId,name:item.topic,accountId:'demo'}],accounts:[{id:'demo',email:'steve@example.com'}],transcripts:[],settings,coverage,scan:{enabled:true,running:false,lastScan:edition.preparedAt,error:null,failures:0,scanned:10,total:10,depth:30}}})
+ })
+ await page.goto('/');await page.locator('.dispatch-rail [data-work-nav="ea"]').click()
+ await expect(page.getByRole('heading',{name:'Your morning briefing'})).toBeVisible();await expect(page.getByRole('heading',{name:'At a glance'})).toBeVisible();await expect(page.getByText('Delivery confirmation needs attention before Friday.',{exact:true})).toBeVisible();await expect(page.getByRole('heading',{name:'Since your briefing'})).toBeVisible()
+ item.status='done';item.revision++;item.updatedAt='2026-10-05T10:00:00Z';await expect(page.getByText('Completed since this edition.',{exact:true})).toBeVisible({timeout:7000});await expect(page.getByText('Jacob owes the delivery confirmation.',{exact:true})).toBeVisible()
+ await page.getByRole('combobox',{name:'Briefing edition'}).selectOption('edition1');await expect(page.getByText('Delivery confirmation needs attention before Friday.',{exact:true})).toBeVisible();await page.locator('.briefing-entry').first().click();await expect(page.getByRole('button',{name:'Reopen',exact:true})).toBeVisible();await page.getByRole('button',{name:'Back to briefing'}).click();await expect(page.getByRole('heading',{name:'At a glance'})).toBeVisible();await page.screenshot({path:resolve('test-results','ea-newspaper.png'),fullPage:true})
+})
+
+test('imports call transcripts, retains inputs on failure, and opens timestamped evidence',async({page})=>{
+ await stubAgent(page)
+ const source={id:'cue',kind:'transcript',accountId:'demo',threadId:'meeting:weekly',messageId:'',importId:'weekly',title:'Weekly proposal call',at:'2026-10-05T08:00:00Z',author:'jacob@example.com',participants:['jacob@example.com'],text:'I will send the scope.',startSeconds:90}
+ const item={id:'call123',accountId:'demo',kind:'task',title:'Send the scope',summary:'Jacob will send the scope.',topic:'Proposal',topicId:'topic123',contacts:['jacob@example.com'],owner:'jacob@example.com',due:null,status:'waiting',certainty:'explicit',snoozedUntil:null,revision:1,updatedAt:source.at,evidence:[{source,quote:source.text}]}
+ const settings={enabled:true,hour:8,minute:0,days:90,accounts:[],importantContacts:[],importantTopics:[]},coverage={scope:'indexed',from:'2026-07-07T08:00:00Z',discovered:1,reviewed:1,pending:0,failed:0,ingestionAt:source.at,mailSyncAt:source.at,mailState:'ready',caughtUp:true,complete:true};const imports:Record<string,unknown>[]=[];let failed=true
+ await page.route('http://127.0.0.1:8413/**',async route=>{const url=new URL(route.request().url());if(url.pathname==='/v1/work/transcripts'){imports.push(route.request().postDataJSON());if(failed){failed=false;return route.fulfill({status:503,json:{error:'temporarily_unavailable',detail:'Transcript import temporarily unavailable.'}})}return route.fulfill({status:202,json:{importId:'weekly'}})}if(url.pathname==='/v1/work/transcript')return route.fulfill({json:{input:{title:source.title,at:source.at},sources:[source]}});if(url.pathname.includes('/items/'))return route.fulfill({json:{item,history:[]}});return route.fulfill({json:{items:[item],decisions:[],updates:[],people:item.contacts,topics:[{id:item.topicId,name:item.topic,accountId:'demo'}],accounts:[{id:'demo',email:'steve@example.com'}],transcripts:[],settings,coverage,scan:{enabled:true,running:false,lastScan:source.at,error:null,failures:0,scanned:1,total:1,depth:30}}})})
+ await page.goto('/');await page.locator('.dispatch-rail [data-work-nav="todos"]').click();await page.getByText('Import call transcript',{exact:true}).click();const form=page.locator('[data-work-import]');await form.locator('input[name=file]').setInputFiles({name:'weekly.vtt',mimeType:'text/vtt',buffer:Buffer.from('WEBVTT\n\n00:01:30.000 --> 00:01:35.000\n<v Jacob>I will send the scope.</v>')});await form.locator('input[name=at]').fill('2026-10-05T08:00');await form.locator('textarea[name=speakers]').fill('Jacob=jacob@example.com');await form.getByRole('button',{name:'Import transcript',exact:true}).click();await expect(page.getByRole('alert')).toContainText('temporarily unavailable');await expect(form.locator('input[name=title]')).toHaveValue('weekly');await form.getByRole('button',{name:'Import transcript',exact:true}).click();await expect.poll(()=>imports.length).toBe(2);expect(imports[1]).toMatchObject({format:'vtt',speakers:{Jacob:'jacob@example.com'},accountId:'demo'});await page.locator('[data-work=source]').click();await expect(page.getByRole('heading',{name:source.title})).toBeVisible();await expect(page.locator('[data-selected-transcript]')).toContainText('01:30');await page.waitForTimeout(5500);await expect(page.getByRole('heading',{name:source.title})).toBeVisible();await page.getByRole('button',{name:'Return to work'}).click();await expect(page.getByRole('heading',{name:item.title,exact:true})).toBeVisible()
 })

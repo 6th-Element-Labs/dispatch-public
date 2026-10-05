@@ -24,15 +24,17 @@ pub fn persistent() -> bool { cfg!(target_os = "macos") && !tauri::is_dev() }
 pub enum Service {
     Mail,
     Agent,
+    Work,
 }
 
 impl Service {
-    pub const ALL: [Service; 2] = [Service::Mail, Service::Agent];
+    pub const ALL: [Service; 3] = [Service::Mail, Service::Agent, Service::Work];
 
     pub fn name(self) -> &'static str {
         match self {
             Service::Mail => "mail",
             Service::Agent => "agent",
+            Service::Work => "work",
         }
     }
 
@@ -40,6 +42,7 @@ impl Service {
         match self {
             Service::Mail => 8411,
             Service::Agent => 8412,
+            Service::Work => 8413,
         }
     }
 
@@ -48,6 +51,7 @@ impl Service {
         match self {
             Service::Mail => "services/mail/server.js",
             Service::Agent => "services/agent/server.js",
+            Service::Work => "services/work/server.js",
         }
     }
 
@@ -55,6 +59,7 @@ impl Service {
         match self {
             Service::Mail => "mail.log",
             Service::Agent => "agent.log",
+            Service::Work => "work.log",
         }
     }
 }
@@ -71,6 +76,7 @@ pub fn service_env(
             match service {
                 Service::Mail => "DISPATCH_MAIL_PORT",
                 Service::Agent => "DISPATCH_AGENT_PORT",
+            Service::Work => "DISPATCH_WORK_PORT",
             }
             .to_string(),
             service.port().to_string(),
@@ -275,7 +281,7 @@ mod tests {
         let supervisor = Supervisor::new(PathBuf::from("/res"), PathBuf::from("/logs"), None);
         assert_eq!(
             supervisor.scripts(),
-            vec![PathBuf::from("/res/services/mail/server.js"), PathBuf::from("/res/services/agent/server.js")]
+            vec![PathBuf::from("/res/services/mail/server.js"), PathBuf::from("/res/services/agent/server.js"), PathBuf::from("/res/services/work/server.js")]
         );
     }
 }

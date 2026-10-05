@@ -47,7 +47,7 @@ The first useful version lets a user:
 5. Open a cited Gmail resource.
 6. Create a draft through Codex.
 7. Review and edit the draft in the middle panel.
-8. Confirm recipients and subject, then send from the Send button, or ask Codex to send that draft through the installed Gmail connector.
+8. Review recipients and subject in the editor, then send with one click on Send, or ask Codex to send that draft through the installed Gmail connector.
 
 The middle panel owns the visible Gmail draft. Recipient, subject, and message body remain editable. The body uses a rich editor with bold, italic, underline, links, lists, and formatted paste. Mail still owns the saved Markdown and rendered email. New and saved drafts can open in their own window. Use the draft header button, double-click its Drafts row, choose Open in New Window from the row menu, or use File > Open in New Window (Command-O). Pop-out transfers the current local editor, including recipients, text, and attachments, without requiring a Gmail save. One window edits each draft at a time. Codex creates and revises that same Gmail draft through the installed connector, including attachments. A draft that Codex creates through MCP opens in the middle panel. The user can send from the Send button, or ask Codex to call `gmail.send_draft` or `gmail.send_email`. Autonomous send without a user request remains out of scope.
 
@@ -57,7 +57,7 @@ Thread rows show a Tabler paperclip when any indexed member has attachments. Onc
 
 ## Current foundation
 
-The current slice proves the service boundaries, real Codex App Server handshake, installed Gmail connector discovery, paginated Gmail synchronization of Inbox, Unread, Sent, Drafts, Spam, Trash, and the archive query into a durable SQLite index, full MIME retrieval, safe browser rendering, and the browser experience. Sync state, timestamps, progress, and failures remain visible. Demo projections require the explicit `DISPATCH_DEMO_MAIL=1` development setting. A missing Gmail connection is a visible readiness failure and never silently substitutes demo mail. Gmail draft create and update may run from the editor or from Codex tools. Codex may send when the user asks it to use the Gmail connector. The Send button still shows a confirm, then dispatch-mail sends the draft. Inbox, Sent, Drafts, Archive, Spam, and Trash lists read that index. All, Unread, and Read on the default queue still exclude spam and trash.
+The current slice proves the service boundaries, real Codex App Server handshake, installed Gmail connector discovery, paginated Gmail synchronization of Inbox, Unread, Sent, Drafts, Spam, Trash, and the archive query into a durable SQLite index, full MIME retrieval, safe browser rendering, and the browser experience. Sync state, timestamps, progress, and failures remain visible. Demo projections require the explicit `DISPATCH_DEMO_MAIL=1` development setting. A missing Gmail connection is a visible readiness failure and never silently substitutes demo mail. Gmail draft create and update may run from the editor or from Codex tools. Codex may send when the user asks it to use the Gmail connector. The Send button submits the current editor snapshot in one click; dispatch-mail saves it and sends it in the background. Inbox, Sent, Drafts, Archive, Spam, and Trash lists read that index. All, Unread, and Read on the default queue still exclude spam and trash.
 
 ## Non-goals for the foundation
 
@@ -77,7 +77,7 @@ A confirmed Gmail draft tool result opens the exact draft and account in the edi
 Transient task-resume failures keep the existing history binding and retry. A new binding is created only for a confirmed missing task. Gmail draft commands retain the strict multipart payload adapter; Codex follows the installed tool schema and the user’s approval policy.
 
 
-Gmail draft recipient fields accept the connector's string arrays as well as legacy strings. To, Cc, and Bcc survive opening and refreshing a draft. The Send button requires at least one To, Cc, or Bcc recipient and does not save an unchanged Gmail draft first; this preserves the provider's original recipients, formatting, and attachments. A changed draft or account invalidates its pending send confirmation.
+Gmail draft recipient fields accept the connector's string arrays as well as legacy strings. To, Cc, and Bcc survive opening and refreshing a draft. The Send button requires at least one To, Cc, or Bcc recipient and does not save an unchanged Gmail draft first; this preserves the provider's original recipients, formatting, and attachments. Send captures the visible account, recipients, text and files. Later editors cannot change that submitted snapshot.
 
 
 Dispatch embeds the full installed Codex experience, not an email-only agent. It adds no model or capability allowlist, or send-button-only policy. The user selects execution permissions in Dispatch; normal Codex model, tools and managed requirements remain authoritative. The internal `dispatch_mail` tools provide an optional path to list accounts, read/create/update drafts, and send the saved draft through Dispatch’s mail service. Header-only updates preserve original MIME content and attachments. These tools are configured for new and resumed conversations, and their confirmed results update the visible editor. The visible draft ID, account, recipients, and unsaved state are supplied as context.
@@ -153,3 +153,12 @@ The thread reader applies the selected mailbox context to raw Gmail thread resul
 ## Sending feedback
 
 Sent Items is the normal confirmation that an email was sent. Do not show a receipt window, receipt controls, or automatic success messages in Codex chat. Keep send failures and uncertain outcomes visible. Internal durable send records support recovery and duplicate prevention; they are not a separate user workflow.
+
+## EA and work continuity
+
+The approved EA and To-dos views make commitments, unanswered questions and decisions
+usable across email threads. Tasks keep source evidence, contact email identities
+and topic context. User edits and completion survive scans and app restarts. Coverage
+and suggestions are explicit. Full specification: [EA and To-dos](EA_TODOS.md).
+
+One click on Send closes the editor immediately. No manual Save or second confirmation is required. Mail persists one send attempt before acknowledging it, finishes any pending draft save, then sends the confirmed Gmail draft once. The user can navigate and compose another email while it runs. A quiet Sending indicator belongs in Mail activity; successful sends appear in Sent. A failure restores the reply when its conversation is still selected, otherwise keeps it in Drafts. Mail activity offers Open reply for failed preparation and Check Sent for uncertain delivery, including after restart. Unknown sends are never replayed automatically.

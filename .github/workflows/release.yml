@@ -86,7 +86,7 @@ jobs:
       - name: Install workspace dependencies
         run: |
           set -euo pipefail
-          for dir in services/web services/mail services/agent apps/desktop; do
+          for dir in services/web services/mail services/agent services/work apps/desktop; do
             npm --prefix "$dir" ci --prefer-offline --no-audit --no-fund
           done
 

@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -7,11 +7,11 @@ import { dispatchMailConfig, handleDispatchMailMcp } from '../src/dispatch-mail-
 const cleanup: (() => Promise<void>)[] = []
 it('permits authorized unsent draft editing without changing send or global approval policy', () => {
   const config = dispatchMailConfig()
-  expect(config['mcp_servers.dispatch_mail'].tools).toEqual({ create_draft: { approval_mode: 'approve' }, update_draft: { approval_mode: 'approve' }, attach_files: { approval_mode: 'approve' }, resolve_draft_conflict: { approval_mode: 'approve' } })
+  expect(config['mcp_servers.dispatch_mail'].tools).toEqual({ create_draft: { approval_mode: 'approve' }, update_todo: { approval_mode: 'approve' }, update_draft: { approval_mode: 'approve' }, attach_files: { approval_mode: 'approve' }, resolve_draft_conflict: { approval_mode: 'approve' } })
   expect(config).not.toHaveProperty('approval_policy')
   expect(config['mcp_servers.dispatch_mail'].tools).not.toHaveProperty('send_draft')
 })
-afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
+afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.unstubAllEnvs() })
 async function setup() {
   const writes: { method: string; url: string; body: Record<string, unknown> }[] = []
   let draft = { id: 'draft-A', accountId: 'account-A', inReplyToMessageId: 'message-A', to: [{ address: 'old@example.com' }], cc: 'copy@example.com', bcc: '', subject: 'Original', bodyMarkdown: 'Original body', attachments: [{ id: 'file-A', sourceMessageId: 'message-A', name: 'original.pdf', mediaType: 'application/pdf' }] }
@@ -97,4 +97,15 @@ it('carries the stable creation UUID into the durable command so a tool retry ca
   const result = await client.callTool({ name: 'create_draft', arguments: { accountId: 'account-A', clientDraftId, to: ['new@example.com'], bodyMarkdown: 'Keep this' } })
   expect(result.isError).not.toBe(true)
   expect(writes).toEqual([{ method: 'POST', url: '/v1/draft-saves', body: { accountId: 'account-A', messageId: '', clientDraftId, to: 'new@example.com', bodyMarkdown: 'Keep this', cc: '', bcc: '' } }])
+})
+
+it('routes saved work reads and versioned task edits to the independent work owner',async()=>{
+ const calls:{url:string;body:unknown}[]=[]
+ const work=createServer(async(req,res)=>{const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));calls.push({url:req.url!,body:chunks.length?JSON.parse(Buffer.concat(chunks).toString()):null});res.setHeader('content-type','application/json');res.end(JSON.stringify(req.method==='POST'?{item:{id:'abc',status:'done',revision:4}}:{items:[{id:'abc',revision:3}],decisions:[]}))})
+ await new Promise<void>(resolve=>work.listen(0,'127.0.0.1',resolve));cleanup.push(()=>new Promise(resolve=>work.close(()=>resolve())))
+ vi.stubEnv('DISPATCH_WORK_BASE',`http://127.0.0.1:${(work.address() as AddressInfo).port}`)
+ const {client,writes}=await setup()
+ const list=await client.callTool({name:'list_work',arguments:{account:'account-A',contact:'jacob@example.com'}});expect(list.isError).not.toBe(true)
+ const update=await client.callTool({name:'update_todo',arguments:{id:'abc',revision:3,status:'done'}});expect(update.structuredContent).toMatchObject({item:{status:'done',revision:4}})
+ expect(calls).toEqual([{url:'/v1/work?account=account-A&contact=jacob%40example.com',body:null},{url:'/v1/work/items/abc',body:{revision:3,status:'done'}}]);expect(writes).toEqual([])
 })

@@ -18,6 +18,7 @@ export default defineConfig({
   }],
   server: { host: '127.0.0.1', port: 8410, strictPort: true, ...(localProxy ? { proxy: {
     '/mail': { target: 'http://127.0.0.1:8411', rewrite: path => path.replace(/^\/mail/, '') },
+    '/work': { target: process.env.DISPATCH_WORK_BASE ?? 'http://127.0.0.1:8413', rewrite: path => path.replace(/^\/work/, '') },
     '/agent': { target: 'http://127.0.0.1:8412', rewrite: path => path.replace(/^\/agent/, '') },
   } } : {}) },
   preview: { host: '127.0.0.1', port: 8410, strictPort: true },

@@ -10,6 +10,7 @@ const packagePaths = [
   ['services/web/package.json', 'json'],
   ['services/mail/package.json', 'json'],
   ['services/agent/package.json', 'json'],
+  ['services/work/package.json', 'json'],
 ]
 
 export function parseCargoPackageVersion(content) {

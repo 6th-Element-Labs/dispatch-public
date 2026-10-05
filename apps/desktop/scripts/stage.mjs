@@ -13,7 +13,7 @@ const resourceRoot = join(desktop, 'src-tauri', 'resources')
 const resources = join(resourceRoot, 'services')
 const legal = join(resourceRoot, 'legal')
 
-const builds = servicesOnly ? ['mail', 'agent'] : ['web', 'mail', 'agent']
+const builds = servicesOnly ? ['mail', 'agent', 'work'] : ['web', 'mail', 'agent', 'work']
 for (const service of builds) {
   console.log(`stage: building services/${service}`)
   execSync(`npm --prefix "${join(repo, 'services', service)}" run build`, { stdio: 'inherit' })
@@ -30,7 +30,7 @@ for (const file of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) {
   }
   copyFileSync(source, join(legal, file))
 }
-for (const service of ['mail', 'agent']) {
+for (const service of ['mail', 'agent', 'work']) {
   const source = join(repo, 'services', service, 'dist', 'src')
   const destination = join(resources, service)
   cpSync(source, destination, { recursive: true })
