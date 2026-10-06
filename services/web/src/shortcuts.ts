@@ -18,6 +18,7 @@ export const SHORTCUT_GROUPS: ReadonlyArray<{ readonly title: string; readonly i
     { label: 'Archive', keys: 'E' }, { label: 'Mark as spam', keys: '!' }, { label: 'Move to Trash', keys: '⌫ or #' },
     { label: 'Mark read or unread', keys: 'U' }, { label: 'Undo last move', keys: '⌘Z' }, { label: 'Ask Codex', keys: '⌘⏎' },
     { label: 'Open in new window', keys: '⌘O' },
+    { label: 'Print email', keys: '⌘P / Ctrl+P' },
   ] },
   { title: 'Navigate', items: [
     { label: 'Next / previous conversation', keys: 'J / K' }, { label: 'Extend selection', keys: '⇧↑ / ⇧↓' },

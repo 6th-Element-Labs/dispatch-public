@@ -10,6 +10,7 @@ mod context_menu;
 mod menu;
 mod message_windows;
 mod preflight;
+mod printing;
 mod sidecars;
 mod background;
 mod updater;
@@ -40,7 +41,7 @@ pub fn run() {
         .manage(updater::UpdateCoordinator::default())
         .manage(web_links::WebLinks::default())
         .manage(message_windows::MessageWindows::default())
-        .invoke_handler(tauri::generate_handler![context_menu::popup_context_menu, web_links::open_web_link, web_links::web_link_state, web_links::web_link_action, appearance::set_appearance, message_windows::open_message_window])
+        .invoke_handler(tauri::generate_handler![context_menu::popup_context_menu, web_links::open_web_link, web_links::web_link_state, web_links::web_link_action, appearance::set_appearance, message_windows::open_message_window, printing::print_email])
         .setup(|app| {
             let handle = app.handle().clone();
             let resources = handle.path().resource_dir()?;
@@ -98,6 +99,11 @@ pub fn run() {
                 }
                 menu::RETURN_TO_MAIL => web_links::return_to_mail(app),
                 menu::OPEN_MESSAGE_WINDOW => { let _ = app.emit_to("main", message_windows::OPEN_SELECTED, ()); }
+                menu::PRINT_EMAIL => {
+                    if let Err(message) = printing::request_from_menu(app) {
+                        show_error(app, "Printing unavailable", &message);
+                    }
+                }
                 appearance::SYSTEM | appearance::LIGHT | appearance::DARK => {
                     if let Err(message) = appearance::choose(app, event.id().as_ref()) {
                         show_error(app, "Dispatch could not change its appearance", &message);

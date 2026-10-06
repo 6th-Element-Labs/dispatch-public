@@ -12,6 +12,7 @@
     "core:window:allow-close",
     "allow-popup-context-menu",
     "allow-open-web-link",
-    "allow-set-appearance"
+    "allow-set-appearance",
+    "allow-print-email"
   ]
 }

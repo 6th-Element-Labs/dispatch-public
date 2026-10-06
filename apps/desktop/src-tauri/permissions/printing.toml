@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-print-email"
+description = "Open the native print dialog for the calling Dispatch mail window."
+commands.allow = ["print_email"]

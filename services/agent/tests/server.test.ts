@@ -944,3 +944,15 @@ it('projects conclusively absent chat history without replacing bindings or hidi
  fake.request.mockImplementation(async()=>{throw new Error('request timed out')});const retry=await fetch(`${base}/v1/work/sources?account=account&thread=mail`);expect(retry.status).toBe(502);expect(await retry.json()).toMatchObject({error:'discussion_unavailable',detail:'request timed out'});expect(bindings.get(key)).toBe('empty');
  expect(fake.request).not.toHaveBeenCalledWith('thread/start',expect.anything());
 });
+
+
+it('reads previously published account-bound chat history after its current binding is replaced',async()=>{
+ const {base,fake,bindings}=await startWithBindings();const key={kind:'contact',accountId:'account',contextId:'jacob@example.com'} as const;await bindings.put(key,'old-chat');
+ await fetch(`${base}/v1/work/changes?cursor=0`);await bindings.replace(key,'new-chat');
+ fake.request.mockImplementation(async(method:string)=>method==='thread/read'?{thread:{id:'old-chat',turns:[]}}:method==='thread/turns/list'?{data:[],nextCursor:null}:{});
+ const response=await fetch(`${base}/v1/work/discussions?account=account&chat=old-chat`);expect(response.status).toBe(200);expect(await response.json()).toMatchObject({binding:{accountId:'account',contextId:'jacob@example.com',codexThreadId:'old-chat'},sources:[]});
+ expect(bindings.get(key)).toBe('new-chat');expect((await fetch(`${base}/v1/work/discussions?account=other&chat=old-chat`)).status).toBe(404);
+ fake.request.mockImplementation(async(method:string)=>{throw new Error(method==='thread/resume'?'no rollout found for thread id old-chat':'thread not loaded: old-chat')});
+ expect((await fetch(`${base}/v1/work/discussions?account=account&chat=old-chat`)).status).toBe(410);expect(bindings.get(key)).toBe('new-chat');
+ fake.request.mockImplementation(async()=>{throw new Error('request timed out')});expect((await fetch(`${base}/v1/work/discussions?account=account&chat=old-chat`)).status).toBe(502);
+});

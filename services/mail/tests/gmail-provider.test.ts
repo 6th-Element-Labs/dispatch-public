@@ -142,7 +142,7 @@ function conversationMessage(id: string, threadId = 'thread-large') {
   }
 }
 
-async function startThreadConnector(options: { indexedIds: string[]; returnedIds: string[]; failedReadIds?: string[]; labelsById?: Record<string,string[]> }) {
+async function startThreadConnector(options: { indexedIds: string[]; returnedIds: string[]; failedReadIds?: string[]; labelsById?: Record<string,string[]>; threadError?: unknown }) {
   const directory = mkdtempSync(join(tmpdir(), 'dispatch-thread-completeness-')); directories.push(directory)
   const indexPath = join(directory, 'gmail.sqlite')
   const index = new GmailIndex(indexPath)
@@ -160,7 +160,7 @@ async function startThreadConnector(options: { indexedIds: string[]; returnedIds
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk))
     const input = JSON.parse(Buffer.concat(chunks).toString() || '{}') as Record<string, unknown>
     if (request.url === '/v1/connectors/gmail') return response.end(JSON.stringify({ accounts: [{ linkId: 'one', connectorId: 'gmail', name: 'Work', email: 'work@example.com' }] }))
-    if (request.url === '/v1/connectors/gmail/read-thread') return response.end(JSON.stringify({ structuredContent: { messages: options.returnedIds.map(id => byId.get(id)).filter(Boolean) } }))
+    if (request.url === '/v1/connectors/gmail/read-thread') return response.end(JSON.stringify(options.threadError??{ structuredContent: { messages: options.returnedIds.map(id => byId.get(id)).filter(Boolean) } }))
     if (request.url === '/v1/connectors/gmail/read') {
       const messageId = String(input.messageId ?? '')
       readIds.push(messageId)
@@ -423,6 +423,21 @@ describe('GmailConnectorProvider', () => {
     const fixture=await startThreadConnector({indexedIds:['excluded'],returnedIds:['excluded'],labelsById:{excluded:[label]}})
     await expect(fixture.provider.readWorkConversation('one','thread-large')).rejects.toMatchObject({code:'work_evidence_unavailable'})
     fixture.provider.stopBackgroundSync()
+  })
+
+  it.each([
+    {error_code:'NOT_FOUND',error_data:{type:'http_error',code:404},missing:true},
+    {error_code:'NOT_FOUND',error_data:{type:'http_error',response:{status:404}},missing:true},
+    {error_code:'NOT_FOUND',error_data:{type:'http_error',code:403},missing:false},
+    {error_code:'NOT_FOUND',error_data:{type:'http_error',code:503},missing:false},
+    {error_code:'NOT_FOUND',error_data:{type:'connection_error',code:404},missing:false},
+    {error_code:'OTHER',error_data:{type:'http_error',code:404},missing:false},
+  ])('retires only structured Gmail thread 404 evidence ($error_code, $error_data)',async({missing,...error})=>{
+    const fixture=await startThreadConnector({indexedIds:['missing'],returnedIds:[],threadError:{isError:true,structuredContent:{error:'HTTP status: 404 not found',...error}}})
+    try {
+      if(missing)await expect(fixture.provider.readWorkConversation('one','thread-large')).rejects.toMatchObject({code:'work_evidence_unavailable'})
+      else await expect(fixture.provider.readWorkConversation('one','thread-large')).rejects.not.toMatchObject({code:'work_evidence_unavailable'})
+    } finally {fixture.provider.stopBackgroundSync()}
   })
 
   it('retains eligible replies when other messages in the thread are excluded',async()=>{

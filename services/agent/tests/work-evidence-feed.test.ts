@@ -11,3 +11,8 @@ it('keeps completed discussion notices after restart and deduplicates replayed t
 it('exports account-scoped bindings without confusing colons in Gmail account IDs',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'dispatch-work-bind-'));try{const store=new CodexBindingStore(join(dir,'bindings.json'));await store.load();await store.put({kind:'conversation',accountId:'a:b',gmailThreadId:'thread'},'chat');expect(store.workBindings()).toMatchObject([{accountId:'a:b',contextId:'thread',kind:'conversation'}]);}finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+it('retains the exact published binding for retired chats within their original account',()=>{
+ const feed=new WorkEvidenceFeed(':memory:');const old={kind:'contact' as const,accountId:'account',contextId:'jacob@example.com',codexThreadId:'old-chat'};
+ try{feed.publish(old,'turn');feed.publish({...old,codexThreadId:'new-chat'},'new-turn');expect(feed.publishedBinding('account','old-chat')).toEqual(old);expect(feed.publishedBinding('other','old-chat')).toBeUndefined();expect(feed.publishedBinding('account','unknown')).toBeUndefined();}finally{feed.close();}
+});

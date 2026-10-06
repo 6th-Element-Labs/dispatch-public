@@ -13,6 +13,7 @@
     "allow-popup-context-menu",
     "allow-open-web-link",
     "allow-set-appearance",
-    "allow-open-message-window"
+    "allow-open-message-window",
+    "allow-print-email"
   ]
 }

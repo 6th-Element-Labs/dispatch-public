@@ -111,6 +111,14 @@ Results stay in the message list during background sync. Each row shows a highli
 
 ## Everyday reliability
 
+File > Print (Command-P or Control-P) prints the newest message in the selected
+conversation through the native macOS print dialog, including its PDF menu and
+printer selection. Each expanded message also has a Tabler Print button for
+printing that specific email. The print snapshot includes subject, sender,
+recipients, date, formatted content and attachment names. It excludes the mail
+list, editor controls and Codex chat. Quoted history is included when expanded
+in that message. Printing preserves the reader and unsaved draft state.
+
 After a suspension gap, the background mail service cancels obsolete read-only scans and requests fresh mailbox heads. Network return and foreground activation also request refresh. This works without an open Dispatch window when macOS resumes the background service; it does not change the Mac's sleep settings. Manual Refresh is accepted immediately and reports progress through sync status. Healthy account results appear as each stream arrives, even if another account is unavailable. Gmail Retry-After remains authoritative. Sends and draft writes are never cancelled or replayed by wake recovery.
 
 Drafts lists are served immediately from the mail index and reconciled with Gmail in the background. Previously saved or opened drafts have a durable mail-owned body cache, so reopening them does not wait for Gmail. Cached editors check for changes asynchronously; that refresh cannot overwrite edits made after opening. A confirmed remote deletion removes an untouched cached editor. Navigation checkpoints unsaved edits locally and leaves remote saves running independently.

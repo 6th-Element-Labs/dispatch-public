@@ -1316,7 +1316,7 @@ export class GmailConnectorProvider {
     let conversation: ConversationProjection
     try { conversation=await this.readConversation(accountId,threadId,Boolean(cached?.conversation.completeness?.complete && ids.length && ids.every(id=>cached.conversation.messages.some(m=>m.id===id)))) }
     catch(error) {
-      if((error as {code?:string}).code==='conversation_not_in_mailbox')throw Object.assign(new Error('This thread has no eligible email evidence.'),{code:'work_evidence_unavailable'});
+      if(['conversation_not_in_mailbox','gmail_thread_not_found'].includes((error as {code?:string}).code??''))throw Object.assign(new Error('This thread has no eligible email evidence.'),{code:'work_evidence_unavailable'});
       throw error;
     }
     const excluded=new Set(this.#index?.excludedWorkMessageIds(accountId,threadId)??[])
@@ -2106,7 +2106,14 @@ export class GmailConnectorProvider {
       throw Object.assign(new Error(`Gmail is rate limiting this account. Retry after ${new Date(retryAt).toISOString()}: ${JSON.stringify(value)}`), { code: 'gmail_backoff', connectorPayload: value })
     }
     if (!response.ok) throw new Error(`Gmail connector request failed (${response.status}): ${JSON.stringify(value)}`)
-    if (record(value)?.isError || structured(value).error) throw Object.assign(new Error(`Gmail connector rejected the request: ${JSON.stringify(value)}`), { connectorPayload: value })
+    if (record(value)?.isError || content.error) {
+      const data = record(content.error_data)
+      // Only the exact Gmail thread read's structured provider 404 retires evidence.
+      // A missing connector route, unauthorized account, or error text alone must retry visibly.
+      const missingThread = path === '/v1/connectors/gmail/read-thread' && content.error_code === 'NOT_FOUND'
+        && data?.type === 'http_error' && (data.code === 404 || record(data.response)?.status === 404)
+      throw Object.assign(new Error(`Gmail connector rejected the request: ${JSON.stringify(value)}`), { connectorPayload: value, ...(missingThread ? { code: 'gmail_thread_not_found' } : {}) })
+    }
     if (!array(content.responses).some(item => record(item)?.success === false)) this.#rateLimitStreak.delete(linkId)
     return value
   }

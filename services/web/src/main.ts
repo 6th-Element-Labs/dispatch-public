@@ -14,6 +14,7 @@ import { THEME_PREFERENCES, createThemeController, type ThemePreference } from '
 import { api } from './api.js'
 import { renderChatMarkdown } from './chat-renderer.js'
 import { renderEmailContent, emailPlainText, applyMailAppearance } from './email-renderer.js'
+import { isPrintShortcut, prepareEmailPrint, PRINT_EMAIL_EVENT } from './email-print.js'
 import { commitRecipientToken, parseRecipientList, serializeRecipientList } from './recipient-field.js'
 
 const mailSurfaceOverrides = new Map<string, 'light' | 'dark'>()
@@ -1164,6 +1165,14 @@ function renderThreadMessage(message: MessageProjection, expanded: boolean): HTM
     applySurface()
   })
   header.append(surfaceToggle)
+  const print = document.createElement('button')
+  print.type = 'button'
+  print.className = 'btn btn-icon btn-sm btn-ghost-secondary'
+  print.setAttribute('aria-label', 'Print this email')
+  print.title = 'Print this email (⌘P / Ctrl+P)'
+  print.innerHTML = '<i class="ti ti-printer" aria-hidden="true"></i>'
+  print.addEventListener('click', () => { void printEmail(message) })
+  header.append(print)
   applySurface()
   article.append(content)
   if (message.attachments.length > 0) {
@@ -4328,11 +4337,47 @@ app.querySelectorAll<HTMLButtonElement>('[data-sidebar-style]').forEach(button =
 // Appearance lives in the native View menu. The shell mirrors the preference
 // (menu check marks and window theme) and forwards menu clicks as an event.
 const nativeTauri = (window as { __TAURI__?: { core?: { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }; event?: { listen: (name: string, handler: (event: { payload: unknown }) => void) => Promise<() => void> } } }).__TAURI__
+let printing = false
+async function printEmail(message?: MessageProjection): Promise<void> {
+  if (printing) return
+  if (workPage?.active || !selected || selected.id !== selectedConversationId || !selected.messages.length || elements.body.querySelector('.dispatch-reader-loading')) {
+    elements.mailError.textContent = 'Select an email and wait for it to load before printing.'
+    elements.mailError.hidden = false
+    return
+  }
+  const target = message ?? [...selected.messages].sort((a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt))[0]!
+  if (!selected.messages.some(item => item.id === target.id)) return
+  printing = true
+  try {
+    const article = [...elements.body.querySelectorAll<HTMLElement>('[data-message-id]')].find(node => node.dataset.messageId === target.id)
+    const quoteStates = [...(article?.querySelectorAll<HTMLDetailsElement>('details.dispatch-quoted-history') ?? [])].map(node => node.open)
+    prepareEmailPrint(target, { downloaded: offlineMode || selected.availability?.mode === 'downloaded', quoteStates })
+    // Commit the print layout before WebKit snapshots it for the native sheet.
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    if (isNativeShell(window as { isTauri?: unknown })) {
+      if (!nativeTauri?.core?.invoke) throw new Error('Native printing is unavailable. Reopen Dispatch and try again.')
+      await nativeTauri.core.invoke('print_email')
+    } else window.print()
+  } catch (error) {
+    elements.mailError.textContent = error instanceof Error ? error.message : String(error)
+    elements.mailError.hidden = false
+  } finally { printing = false }
+}
+window.addEventListener('keydown', event => {
+  if (!isPrintShortcut(event)) return
+  event.preventDefault()
+  event.stopImmediatePropagation()
+  if (!event.repeat) void printEmail()
+}, { capture: true })
 // File → Open in New Window (⌘O) in the native menu opens the selected conversation.
 if (isNativeShell(window as { isTauri?: unknown }) && !inMessageWindow) {
   void nativeTauri?.event?.listen('dispatch://open-message-window', () => { if (activeDraft) void popOutDraft(); else if (selectedConversationId) void openInMessageWindow(selectedConversationId) })
 }
 if (isNativeShell(window as { isTauri?: unknown })) {
+  void nativeTauri?.event?.listen(PRINT_EMAIL_EVENT, () => { void printEmail() }).catch(error => {
+    elements.mailError.textContent = `Could not connect the Print menu: ${String(error)}`
+    elements.mailError.hidden = false
+  })
   const reportAppearance = () => { nativeTauri?.core?.invoke('set_appearance', { preference: theme.preference }).catch(() => {}) }
   reportAppearance()
   void nativeTauri?.event?.listen('dispatch://appearance', event => {

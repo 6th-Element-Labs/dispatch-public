@@ -15,6 +15,7 @@ pub const WEB_RELOAD: &str = "web-reload";
 pub const OPEN_LOGS: &str = "open-logs";
 pub const CHECK_FOR_UPDATES: &str = "check-for-updates";
 pub const OPEN_MESSAGE_WINDOW: &str = "open-message-window";
+pub const PRINT_EMAIL: &str = "print-email";
 
 pub fn application_item_ids() -> Vec<&'static str> {
     vec![RESTART_SERVICES, OPEN_LOGS, CHECK_FOR_UPDATES]
@@ -40,7 +41,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .quit()
         .build()?;
     let open = MenuItemBuilder::with_id(OPEN_MESSAGE_WINDOW, "Open in New Window").accelerator("CmdOrCtrl+O").build(app)?;
-    let file = SubmenuBuilder::new(app, "File").item(&open).build()?;
+    let print = MenuItemBuilder::with_id(PRINT_EMAIL, "Print…").accelerator("CmdOrCtrl+P").build(app)?;
+    let file = SubmenuBuilder::new(app, "File").item(&open).separator().item(&print).build()?;
     let edit = SubmenuBuilder::new(app, "Edit")
         .undo()
         .redo()

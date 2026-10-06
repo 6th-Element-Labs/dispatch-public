@@ -21,6 +21,114 @@ const conversations = messages.map((message) => ({
   messageCount: 1,
 }))
 
+async function stubPrinting(page: Page) {
+  await page.addInitScript(() => {
+    const state = { calls: 0, fail: false, listeners: {} as Record<string, () => void> }
+    Object.assign(window, {
+      isTauri: true, __printing: state,
+      __TAURI__: {
+        core: { invoke: async (command: string) => {
+          if (command === 'print_email') {
+            if (state.fail) throw new Error('Could not open the print dialog')
+            state.calls++
+          }
+          return {}
+        } },
+        event: { listen: async (name: string, handler: () => void) => { state.listeners[name] = handler; return () => {} } },
+      },
+    })
+    window.print = () => { throw new Error('Native printing must use the shell') }
+  })
+}
+type PrintBridge = { __printing: { calls: number; fail: boolean; listeners: Record<string, () => void> } }
+
+test('native print menu and both shortcuts snapshot only the selected newest email', async ({ page }) => {
+  await stubPrinting(page)
+  await page.goto('/')
+  await expect(page.locator('[data-message-id="m1"]')).toBeVisible()
+  const count = () => page.evaluate(() => (window as unknown as PrintBridge).__printing.calls)
+  await page.evaluate(() => (window as unknown as PrintBridge).__printing.listeners['dispatch://print-email']!())
+  await expect.poll(count).toBe(1)
+  const print = page.locator('#dispatch-email-print')
+  await expect(print).toHaveAttribute('data-message-id', 'm1')
+  await expect(print).toContainText('Ana Morales <ana@example.com>')
+  await expect(print).toContainText('September 4, 2026 at 9:42 AM')
+  await expect(print).toContainText('Hello Steve.')
+  await expect(print).not.toContainText('Earlier message')
+  await expect(print.locator('script')).toHaveCount(0)
+  // Native invoke returns before the print sheet closes: the snapshot must survive.
+  await expect(print).toHaveCount(1)
+  await page.getByRole('button', { name: 'James Liu, Services agreement, unread', exact: true }).click()
+  await expect(page.locator('[data-message-id="m2"]')).toBeVisible()
+  await expect(print).toHaveAttribute('data-message-id', 'm1')
+  await page.keyboard.press('Control+p')
+  await expect.poll(count).toBe(2)
+  await expect(print).toHaveAttribute('data-message-id', 'm2')
+  await page.keyboard.press('Meta+p')
+  await expect.poll(count).toBe(3)
+  await page.emulateMedia({ media: 'print' })
+  await expect(page.locator('#app')).toBeHidden()
+  await expect(print).toBeVisible()
+})
+
+test('print button chooses the older email and includes only expanded quoted history', async ({ page }) => {
+  await stubPrinting(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Expand message from Ana Morales', exact: true }).click()
+  const older = page.locator('[data-message-id="m0"]')
+  await older.locator('summary').click()
+  await older.getByRole('button', { name: 'Print this email', exact: true }).click()
+  await expect(page.locator('#dispatch-email-print')).toHaveAttribute('data-message-id', 'm0')
+  await expect(page.locator('#dispatch-email-print')).toContainText('September 3, 2026 at 7:30 AM')
+  await expect(page.locator('#dispatch-email-print')).toContainText('Earlier message')
+  await expect(older.locator('details')).toHaveAttribute('open', '')
+  await expect(page.locator('#dispatch-email-print summary')).toHaveCount(0)
+})
+
+test('print dialog failure is visible and no print occurs while another email is loading', async ({ page }) => {
+  await stubPrinting(page)
+  let releaseRead!: () => void
+  const blockedRead = new Promise<void>(resolve => { releaseRead = resolve })
+  // Install before navigation: Dispatch prefetches adjacent messages.
+  await page.route(/8411\/v1\/conversations\/.*t2/, async route => { await blockedRead; await route.abort() })
+  await page.goto('/')
+  await expect(page.locator('[data-message-id="m1"]')).toBeVisible()
+  await page.evaluate(() => { (window as unknown as PrintBridge).__printing.fail = true })
+  await page.keyboard.press('Control+p')
+  await expect(page.locator('[data-mail-error]')).toContainText('Could not open the print dialog')
+  await page.getByRole('button', { name: 'James Liu, Services agreement, unread', exact: true }).click()
+  await expect(page.getByText('Loading conversation…', { exact: true })).toBeVisible()
+  await page.keyboard.press('Control+p')
+  await expect(page.locator('[data-mail-error]')).toContainText('Select an email and wait for it to load')
+  await expect.poll(() => page.evaluate(() => (window as unknown as PrintBridge).__printing.calls)).toBe(0)
+  releaseRead()
+})
+
+test('print layout keeps long formatted emails and escaped headers without client controls', async ({ page }) => {
+  await stubPrinting(page)
+  await page.route(/8411\/v1\/conversations\/.*t1/, route => route.fulfill({ json: { conversation: {
+    ...conversations[0], source: 'demo', messages: [{ ...messages[0], source: 'demo', subject: '<img src=x onerror=alert(1)>',
+      to: [{ name: 'Steve', address: 'steve@example.com', initials: 'SR' }], cc: [{ name: 'Copy', address: 'copy@example.com', initials: 'C' }],
+      body: { kind: 'sanitized-html', content: `<style>@media print {body{display:none}}</style><p><strong>Formatted mail</strong></p>${'<p>Long email paragraph.</p>'.repeat(150)}` },
+      attachments: [{ id: 'a1', name: 'Proposal & figures.pdf', mediaType: 'application/pdf', sizeLabel: '25 KB' }],
+    }],
+  } } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Print this email', exact: true }).click()
+  await expect(page.locator('#dispatch-email-print h1')).toHaveText('<img src=x onerror=alert(1)>')
+  await expect(page.locator('#dispatch-email-print h1 img')).toHaveCount(0)
+  await expect(page.locator('#dispatch-email-print style')).toHaveCount(0)
+  await expect(page.locator('#dispatch-email-print strong').first()).toHaveText('Formatted mail')
+  await expect(page.locator('#dispatch-email-print')).toContainText('Proposal & figures.pdf (25 KB)')
+  await expect(page.locator('#dispatch-email-print')).toContainText('Copy <copy@example.com>')
+  await expect(page.locator('#dispatch-email-print button')).toHaveCount(0)
+  await page.emulateMedia({ media: 'print' })
+  await expect(page.locator('#app')).toBeHidden()
+  const metrics = await page.locator('#dispatch-email-print').evaluate(node => ({ height: node.getBoundingClientRect().height, overflow: getComputedStyle(node).overflow }))
+  expect(metrics.height).toBeGreaterThan(900)
+  expect(metrics.overflow).toBe('visible')
+})
+
 async function stubAgent(page: import('@playwright/test').Page, bindings: Record<string, { threadId: string }> = {}) {
   await page.unroute('http://127.0.0.1:8412/ready')
   await page.route('http://127.0.0.1:8412/ready', (route) => route.fulfill({ json: { status: 'ready' } }))

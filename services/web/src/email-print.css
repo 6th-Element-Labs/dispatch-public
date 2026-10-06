@@ -1,0 +1,20 @@
+#dispatch-email-print { display: none; }
+@media print {
+  @page { margin: 15mm; }
+  html, body { height: auto !important; min-height: 0 !important; overflow: visible !important; background: white !important; color: black !important; color-scheme: light !important; }
+  body > :not(#dispatch-email-print) { display: none !important; }
+  #dispatch-email-print { display: block !important; width: auto !important; max-width: none !important; margin: 0 !important; padding: 0 !important; color: black; font: 11pt/1.45 -apple-system, BlinkMacSystemFont, sans-serif; overflow-wrap: anywhere; }
+  #dispatch-email-print > header { margin-bottom: 1.5em; padding-bottom: 1em; border-bottom: 1px solid #bbb; break-inside: avoid; }
+  #dispatch-email-print h1 { margin: 0 0 .75em; font-size: 18pt; color: black; }
+  #dispatch-email-print dl { display: grid; grid-template-columns: 3.5em 1fr; gap: .2em .75em; margin: 0; }
+  #dispatch-email-print dt { font-weight: 600; }
+  #dispatch-email-print dd { margin: 0; }
+  #dispatch-email-print .dispatch-thread-body { padding: 0; font-size: inherit; overflow: visible !important; }
+  #dispatch-email-print .dispatch-thread-body[data-kind="plain-text"] { white-space: pre-wrap; }
+  #dispatch-email-print .dispatch-thread-body * { position: static !important; max-width: 100% !important; max-height: none !important; overflow: visible !important; box-shadow: none !important; }
+  #dispatch-email-print img { height: auto; break-inside: avoid; }
+  #dispatch-email-print table { max-width: 100% !important; }
+  #dispatch-email-print a { color: inherit; text-decoration: underline; }
+  #dispatch-email-print footer { margin-top: 1.5em; border-top: 1px solid #bbb; padding-top: 1em; }
+  #dispatch-email-print footer ul { margin: .5em 0 0; padding-left: 1.5em; }
+}

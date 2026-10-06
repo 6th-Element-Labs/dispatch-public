@@ -70,6 +70,11 @@ pub fn guard_mail_view<'a>(app: &AppHandle, builder: WebviewWindowBuilder<'a, ta
 fn mail_view_label(label: &str) -> bool { label == "main" || label.starts_with(super::message_windows::LABEL_PREFIX) }
 /// The command came from the main mail window's local page.
 pub fn trusted_main(app: &AppHandle, view: &Webview) -> Result<(), String> { trusted(app, view, "main", "/") }
+/// Printing is limited to local main/message pages, never the web link viewer.
+pub fn trusted_mail_view(app: &AppHandle, view: &Webview) -> Result<(), String> {
+    if !mail_view_label(view.label()) { return Err("Select an email in Dispatch to print.".into()); }
+    trusted(app, view, view.label(), "/")
+}
 fn layout(app: &AppHandle, size: PhysicalSize<u32>, scale: f64) {
     let top = (TOOLBAR_HEIGHT * scale).round() as u32;
     if let Some(view) = app.get_webview(TOOLBAR) {
