@@ -54,6 +54,11 @@ Keep a separate encrypted offline backup of that private key.
 
 The workflow creates a draft release. It does not publish it.
 
+The signed macOS jobs allow three hours for Apple's app and DMG notarization.
+Their temporary signing keychains stay unlocked for four hours so signing the
+DMG can still finish after a long app notarization wait. The workflow always
+removes the keychain and temporary signing files when the job ends.
+
 ## Draft acceptance
 
 Download both draft DMGs and `SHA256SUMS.txt`. Verify the checksum of each DMG, updater archive, signature, and `latest.json`, then check each mounted app:

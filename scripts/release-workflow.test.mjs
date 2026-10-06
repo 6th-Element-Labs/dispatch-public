@@ -62,6 +62,21 @@ describe('public release workflow', () => {
     assert.doesNotMatch(workflow, new RegExp(`pull_request_target|workflow_dispatch|tauri-action@|${privateNames}`))
   })
 
+  it('keeps the signing keychain unlocked through slow notarization', async () => {
+    const workflow = await readPublicFile(
+      'deploy/public/.github/workflows/release.yml',
+      '.github/workflows/release.yml',
+    )
+    const signedJob = workflow.match(/^  macos-build:\n([\s\S]*?)(?=^  publish:)/m)?.[1]
+    assert.ok(signedJob, 'signed build job must exist')
+    const timeoutMinutes = Number(signedJob.match(/timeout-minutes: (\d+)/)?.[1])
+    const keychainSeconds = Number(signedJob.match(/set-keychain-settings -t (\d+) -u/)?.[1])
+    assert.ok(timeoutMinutes >= 180, 'allow slow Apple app and DMG notarization')
+    assert.ok(keychainSeconds > timeoutMinutes * 60, 'keychain must not lock before the job ends')
+    assert.match(signedJob, /name: Remove temporary signing material\n\s+if: always\(\)/)
+    assert.match(signedJob, /security delete-keychain "\$RUNNER_TEMP\/build\.keychain"/)
+  })
+
   it('documents every signing and native acceptance gate', async () => {
     const runbook = await readPublicFile(
       'deploy/public/docs/RELEASING.md',

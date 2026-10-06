@@ -54,7 +54,7 @@ jobs:
             target: x86_64-apple-darwin
             arch: x86_64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 180
     environment: release
     permissions:
       contents: read
@@ -107,7 +107,7 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/build.keychain"
           security default-keychain -s "$RUNNER_TEMP/build.keychain"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/build.keychain"
-          security set-keychain-settings -t 3600 -u "$RUNNER_TEMP/build.keychain"
+          security set-keychain-settings -t 14400 -u "$RUNNER_TEMP/build.keychain"
           security import "$RUNNER_TEMP/DeveloperID.p12" \
             -k "$RUNNER_TEMP/build.keychain" \
             -P "$APPLE_CERTIFICATE_PASSWORD" \
