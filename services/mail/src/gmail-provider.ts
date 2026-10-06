@@ -1670,7 +1670,7 @@ export class GmailConnectorProvider {
     // Persist intent before any provider read. Gmail may be offline when the user attaches a
     // file, and a queued creation ID is valid before it has a remote Gmail ID.
     const queued = this.#local.draftSave(accountId, draftId)
-      ?? this.#local.draftSaves().find(job => job.accountId === accountId && job.remoteId === draftId && job.state !== 'cancelled')
+      ?? this.#local.draftSaves({ accountId, remoteId: draftId, states: ['pending', 'failed', 'saved'] })[0]
     const seed = queued?.draft ?? this.#drafts.get(`${accountId}:${draftId}`) ?? this.#local.draft(accountId, draftId)
       ?? projectDraft({ id: draftId, accountId, inReplyToMessageId: '', to: [], subject: '', bodyMarkdown: '' })
     const accepted = this.#draftQueue.enqueueAttachmentAppend(accountId, draftId, additions, operationId, seed)

@@ -162,8 +162,8 @@ export class DraftSaveQueue {
     await this.#waitForWorkers()
   }
   owns(accountId: string, id: string): boolean { return Boolean(this.store.draftSave(accountId, id)) }
-  origin(accountId: string, id: string): string | undefined { return this.store.draftSaves().find(job => job.accountId === accountId && job.remoteId === id && job.state === 'saved')?.id }
-  pendingRemote(accountId: string, id: string): DraftSaveJob | undefined { return this.pending(accountId).find(job => job.remoteId === id) }
+  origin(accountId: string, id: string): string | undefined { return this.store.draftSaves({ accountId, remoteId: id, states: ['saved'] })[0]?.id }
+  pendingRemote(accountId: string, id: string): DraftSaveJob | undefined { return this.store.draftSaves({ accountId, remoteId: id, states: ['pending', 'failed'] })[0] }
   editorFields(accountId: string, id: string, fields: DraftSaveFields): DraftSaveFields {
     const job = this.store.draftSave(accountId, id)
     if (!job) return fields
@@ -176,18 +176,18 @@ export class DraftSaveQueue {
     }
     return result
   }
-  cancelled(): DraftSaveJob[] { return this.store.draftSaves().filter(job => job.state === 'cancelled' && !job.cleanupDone) }
+  cancelled(): DraftSaveJob[] { return this.store.draftSaves({ states: ['cancelled'], cleanupPending: true }) }
   retryNow(): void {
     for (const job of this.pending()) if (job.state === 'pending') this.store.putDraftSave({ ...job, retryAt: 0 })
     this.#kick()
   }
-  pending(accountId?: string): DraftSaveJob[] { return this.store.draftSaves().filter(job => ['pending', 'failed'].includes(job.state) && (!accountId || job.accountId === accountId)) }
+  pending(accountId?: string): DraftSaveJob[] { return this.store.draftSaves({ states: ['pending', 'failed'], accountId }) }
 
   enqueue(accountId: string, messageId: string, fields: DraftSaveFields, remoteId?: string, seed?: DraftProjection, clientDraftId?: string): DraftProjection {
     // The editor recovery UUID and Codex creation UUID need not be the same.
     // A supplied draft ID identifies the existing record; a recovery key only
     // supplies an idempotent identity when creating a new draft.
-    const identified = remoteId ? this.store.draftSave(accountId, remoteId) ?? this.store.draftSaves().find(job => job.accountId === accountId && job.remoteId === remoteId && job.state !== 'cancelled') : undefined
+    const identified = remoteId ? this.store.draftSave(accountId, remoteId) ?? this.store.draftSaves({ accountId, remoteId, states: ['pending', 'failed', 'saved'] })[0] : undefined
     const client = clientDraftId ? this.store.draftSave(accountId, `queued-${clientDraftId}`) : undefined
     if (identified && client && identified.id !== client.id) throw new Error('Draft identities refer to different drafts')
     if (remoteId && client && !identified && client.remoteId !== remoteId && client.id !== remoteId) throw new Error('Draft identities refer to different drafts')
@@ -280,7 +280,7 @@ export class DraftSaveQueue {
   enqueueAttachmentAppend(accountId: string, draftId: string, attachments: readonly DraftAttachment[], operationId: string, seed?: DraftProjection): DraftProjection {
     if (!accountId || !draftId || !operationId.trim() || !attachments.length) throw new Error('Account, draft, operation ID and files are required')
     if (attachments.some(file => !file.name || !file.mediaType || !hasBytes(file))) throw new Error('Draft attachment append is missing file bytes')
-    let prior = this.store.draftSave(accountId, draftId) ?? this.store.draftSaves().find(job => job.accountId === accountId && job.remoteId === draftId && job.state !== 'cancelled')
+    let prior = this.store.draftSave(accountId, draftId) ?? this.store.draftSaves({ accountId, remoteId: draftId, states: ['pending', 'failed', 'saved'] })[0]
     if (draftId.startsWith('queued-') && !prior) throw new Error('Queued draft was not found')
     if (prior?.state === 'cancelled') throw new Error('Draft was discarded')
     const previous = prior?.draft ?? seed ?? (draftId.startsWith('queued-') ? undefined : projectDraft({ id: draftId, accountId, inReplyToMessageId: '', to: [], subject: '', bodyMarkdown: '' }))
@@ -436,7 +436,7 @@ export class DraftSaveQueue {
       this.#scheduleWorkers(accountId)
       const target = this.#workers.get(accountId)
       if (target) { await target; continue }
-      const runnable = this.store.draftSaves().some(job => job.accountId === accountId && this.#hasRunnable(job))
+      const runnable = this.store.draftSaves({ accountId, unfinished: true }).some(job => this.#hasRunnable(job))
       if (!runnable) return
       const workers = [...this.#workers.values()]
       if (!workers.length) return
@@ -500,7 +500,7 @@ export class DraftSaveQueue {
   }
   #scheduleWorkers(onlyAccountId?: string): void {
     if (this.#stopped || this.#paused || this.#workers.size >= DraftSaveQueue.accountWorkerLimit) return
-    const accounts = [...new Set(this.store.draftSaves().filter(job => this.#hasRunnable(job) && (!onlyAccountId || job.accountId === onlyAccountId)).map(job => job.accountId))]
+    const accounts = [...new Set(this.store.draftSaves({ accountId: onlyAccountId, unfinished: true }).filter(job => this.#hasRunnable(job)).map(job => job.accountId))]
     for (const accountId of accounts) {
       if (this.#workers.size >= DraftSaveQueue.accountWorkerLimit) break
       if (this.#resolvingAccounts.has(accountId)) continue
@@ -525,7 +525,7 @@ export class DraftSaveQueue {
   }
   async #runAccount(accountId: string): Promise<void> {
     while (!this.#stopped && !this.#paused) {
-      const runnable = this.store.draftSaves().filter(item => item.accountId === accountId && this.#hasRunnable(item))
+      const runnable = this.store.draftSaves({ accountId, unfinished: true }).filter(item => this.#hasRunnable(item))
       const priority = this.#priorityDrafts.get(accountId)
       const job = runnable.find(item => priority?.has(item.id)) ?? runnable[0]
       if (!job) return

@@ -4732,3 +4732,24 @@ test('reselecting an email joins its existing refresh and still displays the fre
     expect(f.reads()).toBe(1)
   } finally { f.release() }
 })
+
+
+test('prefetch follows the selected email so next-message navigation stays warm beyond the top rows', async ({ page }) => {
+  const rows = Array.from({ length: 12 }, (_, index) => ({ ...conversations[0]!, id: `demo:n${index}`, threadId: `n${index}`, latestMessageId: `email${index}`,
+    sender: { name: `Person ${index}`, address: `person${index}@example.com`, initials: 'P' }, subject: `Next email ${index}`, unread: false }))
+  const reads: string[] = []
+  await page.route(/8411\/v1\/conversations\?/, route => route.fulfill({ json: { source: 'demo', conversations: rows } }))
+  await page.route(/8411\/v1\/conversations\/[^/?]+(\?|$)/, route => {
+    const url = new URL(route.request().url())
+    const thread = url.pathname.split('/').pop()!
+    reads.push(thread)
+    const row = rows.find(row => row.threadId === thread)!
+    return route.fulfill({ json: { conversation: { ...row, source: 'demo', messages: [{ ...row, id: row.latestMessageId, source: 'demo', body: { kind: 'plain-text', content: `Message ${thread}` }, attachments: [] }] } } })
+  })
+  await page.goto('/')
+  await expect(page.getByText('Message n0', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Person 4, Next email 4', exact: true }).click()
+  await expect(page.getByText('Message n4', { exact: true })).toBeVisible()
+  await expect.poll(() => ['n5', 'n6', 'n7'].every(thread => reads.includes(thread))).toBe(true)
+  expect(reads).not.toContain('n10')
+})

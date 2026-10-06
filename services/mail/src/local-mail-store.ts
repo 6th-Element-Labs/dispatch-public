@@ -32,6 +32,10 @@ export class LocalMailStore {
       CREATE TABLE IF NOT EXISTS local_state(key TEXT PRIMARY KEY,payload TEXT NOT NULL);`)
     this.#db.exec('CREATE TABLE IF NOT EXISTS saved_drafts(account_id TEXT NOT NULL, draft_id TEXT NOT NULL, thread_id TEXT, message_id TEXT, confirmed_at TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(account_id,draft_id))')
     this.#db.exec('CREATE TABLE IF NOT EXISTS draft_saves(account_id TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(account_id,id))')
+    // Expression indexes also upgrade existing stores without rewriting or
+    // removing saved draft payloads. Routine queue queries avoid old attachments.
+    this.#db.exec("CREATE INDEX IF NOT EXISTS draft_save_state ON draft_saves(json_extract(payload,'$.state'),account_id)")
+    this.#db.exec("CREATE INDEX IF NOT EXISTS draft_save_remote ON draft_saves(account_id,json_extract(payload,'$.remoteId'))")
     this.#db.exec('CREATE TABLE IF NOT EXISTS draft_conflict_copies(id TEXT PRIMARY KEY, account_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)')
     this.#db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS downloaded_search USING fts5(account_id UNINDEXED,message_id UNINDEXED,thread_id UNINDEXED,text,tokenize='unicode61')")
     if (!this.#db.prepare("SELECT key FROM local_state WHERE key='downloaded-search-v1'").get()) {
@@ -52,7 +56,18 @@ export class LocalMailStore {
     const row = this.#db.prepare('SELECT payload FROM draft_saves WHERE account_id=? AND id=?').get(accountId, id)
     return row ? JSON.parse(String(row.payload)) : undefined
   }
-  draftSaves(): DraftSaveJob[] { return this.#db.prepare('SELECT payload FROM draft_saves ORDER BY rowid').all().map(row => JSON.parse(String(row.payload))) }
+  draftSaves(filter: { accountId?: string; remoteId?: string; states?: readonly DraftSaveJob['state'][]; unfinished?: boolean; cleanupPending?: boolean } = {}): DraftSaveJob[] {
+    if (filter.states?.length === 0) return []
+    const where: string[] = []
+    const parameters: string[] = []
+    if (filter.accountId !== undefined) { where.push('account_id=?'); parameters.push(filter.accountId) }
+    if (filter.remoteId !== undefined) { where.push("json_extract(payload,'$.remoteId')=?"); parameters.push(filter.remoteId) }
+    if (filter.states) { where.push(`json_extract(payload,'$.state') IN (${filter.states.map(() => '?').join(',')})`); parameters.push(...filter.states) }
+    if (filter.unfinished) where.push("(json_extract(payload,'$.state')='pending' OR (json_extract(payload,'$.state')='cancelled' AND NOT coalesce(json_extract(payload,'$.cleanupDone'),0)))")
+    if (filter.cleanupPending) where.push("NOT coalesce(json_extract(payload,'$.cleanupDone'),0)")
+    return this.#db.prepare(`SELECT payload FROM draft_saves${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY rowid`)
+      .all(...parameters).map(row => JSON.parse(String(row.payload)))
+  }
   putDraftSave(job: DraftSaveJob): void { this.#db.prepare('INSERT OR REPLACE INTO draft_saves VALUES(?,?,?)').run(job.accountId, job.id, JSON.stringify(job)) }
   putConflictCopy(accountId: string, draftId: string, local: DraftProjection, remote: DraftProjection, choice: 'keep-local' | 'use-remote'): string {
     const id = randomUUID()

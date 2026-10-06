@@ -1802,7 +1802,10 @@ async function runThreadContextCommand(id: string): Promise<void> {
 }
 
 function prefetchConversations(exceptId: string): void {
-  for (const summary of (searchView?.results.map(result => result.conversation) ?? conversations).filter((item) => item.id !== exceptId).slice(0, 3)) {
+  const ordered = searchView?.results.map(result => result.conversation) ?? conversations
+  const position = Math.max(0, ordered.findIndex(item => item.id === exceptId))
+  const nearby = [...ordered.slice(position + 1, position + 4), ...ordered.slice(Math.max(0, position - 3), position).reverse()]
+  for (const summary of nearby.slice(0, 3)) {
     const key = conversationCacheKey(summary)
     if (!conversationCache.has(key)) {
       const request = api.readConversation(summary.threadId, summary.accountId ?? selectedAccountId, offlineMode, mailbox, true)
