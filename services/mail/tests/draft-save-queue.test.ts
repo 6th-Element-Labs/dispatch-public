@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DraftSaveQueue, type DraftSaveGateway, type DraftSaveJob } from '../src/draft-save-queue.js'
-import { draftChanges, DraftConflictError } from '../src/draft-conflict.js'
+import { conflictingDraftFields, draftChanges, DraftConflictError } from '../src/draft-conflict.js'
 import { LocalMailStore } from '../src/local-mail-store.js'
 import { projectDraft } from '../src/draft.js'
 import type { DraftProjection } from '../src/model.js'
@@ -301,6 +301,58 @@ it('rebases a newer body edit onto its own confirmed write without a false confl
   release(); await flight
   expect(f.remote.bodyMarkdown).toBe('Newer body edit')
   expect(f.store.draftSave('one', first.id)).toMatchObject({ state: 'saved', fields: { bodyMarkdown: 'Newer body edit' }, base: f.remote })
+})
+it('keeps its confirmed Gmail baseline across later edits from the original reply editor', async () => {
+  const f = setup()
+  // Mail seeds the thread identity with an empty body; the editor observes the
+  // complete queued reply returned by enqueue, not that internal seed.
+  const original = projectDraft({ ...f.remote, id: '', bodyMarkdown: '', attachments: [] })
+  const create = f.gateway.create
+  f.gateway.create = vi.fn(async job => {
+    await create(job)
+    f.setRemote(projectDraft({ ...f.remote, bodyMarkdown: `${job.fields.bodyMarkdown}\n\nOn Monday, Sender wrote:\n\n> Original email` }))
+    return f.remote
+  })
+  const update = f.gateway.update
+  f.gateway.update = vi.fn(async (job, current) => {
+    const fields = draftChanges(job.fields, job.base)
+    const conflicts = conflictingDraftFields(fields, job.base, current)
+    if (conflicts.length) throw new DraftConflictError(conflicts, current)
+    return update({ ...job, fields }, current)
+  })
+  const created = f.queue.enqueue('one', 'message', { bodyMarkdown: 'Reply text', attachments: [] }, undefined, original)
+  await f.queue.flush()
+  const originalEditor = { ...created }
+  for (const bodyMarkdown of ['First typed reply', 'Final typed reply']) {
+    f.queue.enqueue('one', 'message', { bodyMarkdown }, created.id, originalEditor)
+    await f.queue.flush()
+    expect(f.store.draftSave('one', created.id)).toMatchObject({ state: 'saved', draft: { bodyMarkdown } })
+    expect(f.remote.bodyMarkdown).toBe(bodyMarkdown)
+  }
+  // Own acknowledgements are safe to rebase; a real subsequent Gmail edit is not.
+  f.setRemote(projectDraft({ ...f.remote, bodyMarkdown: 'External Gmail edit' }))
+  f.queue.enqueue('one', 'message', { bodyMarkdown: 'Later unsent edit' }, created.id, originalEditor)
+  await f.queue.flush()
+  expect(f.store.draftSave('one', created.id)).toMatchObject({ state: 'failed', conflictFields: ['bodyMarkdown'] })
+  expect(f.remote.bodyMarkdown).toBe('External Gmail edit')
+})
+it('accepts an edit against a newly observed Gmail baseline after its own saved revision', async () => {
+  const f = setup()
+  const created = f.queue.enqueue('one', 'message', { bodyMarkdown: 'First reply' })
+  await f.queue.flush()
+  f.setRemote(projectDraft({ ...f.remote, bodyMarkdown: 'Gmail edit I have now read' }))
+  const observed = { ...f.remote, id: created.id }
+  const update = f.gateway.update
+  f.gateway.update = vi.fn(async (job, current) => {
+    const fields = draftChanges(job.fields, job.base)
+    const conflicts = conflictingDraftFields(fields, job.base, current)
+    if (conflicts.length) throw new DraftConflictError(conflicts, current)
+    return update({ ...job, fields }, current)
+  })
+  f.queue.enqueue('one', 'message', { bodyMarkdown: 'My edit after reading Gmail' }, created.id, observed)
+  await f.queue.flush()
+  expect(f.store.draftSave('one', created.id)?.state).toBe('saved')
+  expect(f.remote.bodyMarkdown).toBe('My edit after reading Gmail')
 })
 it('restores the original body when a newer edit reverts an in-flight body save', async () => {
   const f = setup(); const base = f.remote

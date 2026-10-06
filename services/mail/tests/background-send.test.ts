@@ -94,7 +94,7 @@ it('resolves an externally sent Gmail draft back to its saved queue identity and
 it('consumes recovery only when Sent contains the same recipients, full body and attachment bytes', async () => {
   const provider = new GmailConnectorProvider('http://127.0.0.1:1', { indexPath: false, localPath: ':memory:', draftListLagMs: 0 })
   const file = { name: 'proposal.pdf', mediaType: 'application/pdf', contentBase64: 'YWJj' }
-  const message = { id: 'sent', threadId: 'thread', sender: { address: 'me@example.com', name: 'Me', initials: 'M' }, to: [{ address: 'test@example.com', name: 'Test', initials: 'T' }], cc: [], bcc: [], subject: 'Reply', receivedAt: new Date().toISOString(), receivedLabel: '', receivedFullLabel: '', preview: '', unread: false, accountId: 'one', labels: ['SENT'], source: 'gmail' as const, body: { kind: 'sanitized-html' as const, content: '<p>Full <strong>reply</strong>.</p>' }, attachments: [{ id: 'file', name: file.name, mediaType: file.mediaType, sizeLabel: '3 B' }] }
+  const message = { id: 'sent', threadId: 'thread', sender: { address: 'me@example.com', name: 'Me', initials: 'M' }, to: [{ address: 'test@example.com', name: 'Test', initials: 'T' }], cc: [], bcc: [], subject: 'Reply', receivedAt: new Date().toISOString(), receivedLabel: '', receivedFullLabel: '', preview: '', unread: false, accountId: 'one', labels: ['SENT'], source: 'gmail' as const, body: { kind: 'sanitized-html' as const, content: '<p>Full <strong>reply</strong>.</p>' }, attachments: [{ id: 'file', name: file.name, mediaType: file.mediaType, sizeLabel: '3 B', contentId: 'generated@draft.dispatch.local' }] }
   vi.spyOn(provider, 'readMessage').mockResolvedValue(message)
   vi.spyOn(provider, 'readAttachment').mockResolvedValue({ structuredContent: { base64_url_content: 'YWJj' } })
   provider.recordExternalSend('one', 'sent', 'remote')
@@ -104,6 +104,8 @@ it('consumes recovery only when Sent contains the same recipients, full body and
     expect(await provider.sentDraftMatches('one', 'remote', { ...fields, bodyMarkdown: 'Full **reply**.\n\nNew unsent edits.' })).toBe(false)
     expect(await provider.sentDraftMatches('one', 'remote', { ...fields, cc: 'other@example.com' })).toBe(false)
     expect(await provider.sentDraftMatches('one', 'remote', { ...fields, attachments: [{ ...file, contentBase64: 'eHl6' }] })).toBe(false)
+    expect(await provider.sentDraftMatches('one', 'remote', { ...fields, attachments: [{ ...file, contentId: 'inline-image@example.com' }] })).toBe(false)
+    expect(await provider.sentDraftMatches('one', 'remote', { ...fields, attachments: [{ ...file, contentId: 'generated@draft.dispatch.local' }] })).toBe(true)
     expect(await provider.sentDraftMatches('other', 'remote', fields)).toBe(false)
   } finally { provider.stopBackgroundSync() }
 })

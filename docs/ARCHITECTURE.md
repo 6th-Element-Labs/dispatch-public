@@ -2,6 +2,8 @@
 
 Mail owns a durable SQLite command queue for label changes. Its index transaction records the command and applies local flags together. The worker replays idempotent commands in account order; accepted-action and read-state overlays survive restart and partial synchronization. Web holds only the brief optimistic presentation state while mail commits. Send remains a separate, non-replayed operation with uncertain outcomes preserved.
 
+Mail's draft queue retains the editor's last observed baseline separately from Gmail's confirmed copy. Later typing from the same editor rebases over its own acknowledged writes, including reply history added by Gmail. A newly observed Gmail baseline replaces the relevant fields; an unobserved external edit still raises a conflict.
+
 Status: accepted foundation direction
 
 ## Decision

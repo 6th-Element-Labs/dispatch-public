@@ -19,6 +19,8 @@ export interface DraftSaveJob {
   id: string; accountId: string; messageId: string; remoteId?: string; fields: DraftSaveFields; draft: DraftProjection
   /** Remote snapshot against which the current coalesced edits were made. */
   base?: DraftProjection
+  /** Last editor baseline; its own acknowledged writes must not look external. */
+  editorBase?: DraftProjection
   conflictRemote?: DraftProjection
   conflictFields?: readonly string[]
   revision: number; state: 'pending' | 'failed' | 'saved' | 'cancelled'; retryAt: number; attempts: number
@@ -245,16 +247,22 @@ export class DraftSaveQueue {
       : prior?.state === 'saved' ? prior.base ?? prior.draft
         : remoteId && !remoteId.startsWith('queued-') ? seed : undefined
     if (base && editorBase) {
+      const changedEditorBase = prior?.editorBase ? draftChanges(editableFields(editorBase), prior.editorBase) : undefined
       for (const key of ['to', 'cc', 'bcc', 'subject', 'bodyMarkdown', 'attachments'] as const) {
         const value = acceptedFields[key]
-        if (value !== undefined && !fieldUnchangedFrom(key, value, editorBase)) base = { ...base, [key]: editorBase[key] }
+        // An editor can keep typing from its original snapshot after Gmail confirms
+        // our save (and appends reply history). Retain that confirmation until the
+        // editor actually observes a different baseline. External edits still
+        // compare against the last confirmed Gmail copy in the worker.
+        if (value !== undefined && !fieldUnchangedFrom(key, value, editorBase)
+          && (!changedEditorBase || changedEditorBase[key] !== undefined)) base = { ...base, [key]: editorBase[key] }
       }
       // The editor baseline may contain locally projected bytes that Gmail has
       // not confirmed. Keep the prior remote baseline until append readback wins.
       if (supersedesObservedAppend) base = { ...base, attachments: prior?.base?.attachments ?? base.attachments }
     }
     this.store.putDraftSave({ id, accountId, messageId: messageId || prior?.messageId || previous?.inReplyToMessageId || '', remoteId: prior?.remoteId ?? (remoteId?.startsWith('queued-') ? undefined : remoteId),
-      fields: merged, draft, base, revision: (prior?.revision ?? 0) + 1, state: conflictedPrior ? 'failed' : 'pending', retryAt: 0,
+      fields: merged, draft, base, editorBase: !prior && !remoteId ? draft : editorBase ?? draft, revision: (prior?.revision ?? 0) + 1, state: conflictedPrior ? 'failed' : 'pending', retryAt: 0,
       attempts: conflictedPrior ? prior?.attempts ?? 0 : 0, reconnect: conflictedPrior ? prior?.reconnect ?? false : false,
       error: conflictedPrior ? prior?.error : undefined, createdAt: prior?.createdAt ?? new Date(this.now()).toISOString(), started: prior?.started,
       attachmentAppends, conflictRemote, conflictFields })

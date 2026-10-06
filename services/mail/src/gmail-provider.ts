@@ -1795,7 +1795,10 @@ export class GmailConnectorProvider {
     const actual = await this.#resolveDraftAttachments(accountId, sent.attachments.map(file => ({ ...file, sourceMessageId: sent.id })))
     const remaining = [...actual]
     for (const file of expected) {
-      const index = remaining.findIndex(candidate => fileMatches(file, candidate) && file.contentId === candidate.contentId)
+      // The provider assigns a Content-ID to ordinary uploaded files. Only an
+      // explicit editor CID is an identity to preserve (for inline references).
+      const index = remaining.findIndex(candidate => fileMatches(file, candidate)
+        && (file.contentId === undefined || file.contentId === candidate.contentId))
       if (index < 0) return false
       remaining.splice(index, 1)
     }
