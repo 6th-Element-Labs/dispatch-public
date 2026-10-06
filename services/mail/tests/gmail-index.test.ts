@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GmailIndex, flagsAfterAction, folderFlagsFromLabels, type IndexedGmailMessage } from '../src/gmail-index.js'
 
 const directories: string[] = []
@@ -23,6 +23,76 @@ function message(
     ...extra,
   }
 }
+
+describe('confirmed sends while Gmail search catches up', () => {
+  it('persists the actual sent row through restart and absent full/partial search snapshots', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dispatch-confirmed-sent-')); directories.push(directory)
+    const path = join(directory, 'gmail.sqlite')
+    let index = new GmailIndex(path)
+    index.confirmSent('account-1', message('m1', true, true, { inSent: true }), 'send')
+    index.close(); index = new GmailIndex(path)
+    try {
+      index.replaceAccount('account-1', [], 'lagging-full', true)
+      for (const flag of ['sent', 'inbox', 'unread'] as const) {
+        expect(index.reconcileStream('account-1', flag, [], 'lagging-partial').cleared).toBe(0)
+        expect(index.clearFlagFor('account-1', flag, ['m1'], 'lagging-head').cleared).toBe(0)
+      }
+      expect(index.mailboxConversations('sent', 'all')).toHaveLength(1)
+      expect(index.conversations('unread')).toHaveLength(1)
+    } finally { index.close() }
+  })
+  it('acknowledges each search stream independently, then applies ordinary departure rules', () => {
+    const index = new GmailIndex(':memory:')
+    try {
+      index.confirmSent('account-1', message('m1', true, true, { inSent: true }), 'send')
+      index.reconcileStream('account-1', 'sent', ['m1'], 'caught-up')
+      expect(index.reconcileStream('account-1', 'inbox', [], 'older-inbox').cleared).toBe(0)
+      expect(index.reconcileStream('account-1', 'sent', [], 'later-sent').cleared).toBe(1)
+      index.reconcileStream('account-1', 'inbox', ['m1'], 'caught-up-inbox')
+      expect(index.clearFlagFor('account-1', 'inbox', ['m1'], 'later-inbox').cleared).toBe(1)
+    } finally { index.close() }
+  })
+  it('allows Trash immediately and does not resurrect a locally deleted send', () => {
+    const index = new GmailIndex(':memory:')
+    try {
+      const sent = message('m1', true, true, { inSent: true })
+      index.confirmSent('account-1', sent, 'send')
+      index.applyConversationAction('account-1', ['m1'], 'trash', true)
+      index.replaceAccount('account-1', [sent], 'older-labels', false)
+      expect(index.mailboxConversations('sent', 'all')).toEqual([])
+      expect(index.mailboxConversations('inbox', 'all')).toEqual([])
+      expect(index.mailboxConversations('trash', 'all')).toHaveLength(1)
+    } finally { index.close() }
+  })
+  it('accepts a subsequent authoritative Trash read and permanent deletion', () => {
+    const index = new GmailIndex(':memory:')
+    try {
+      index.confirmSent('account-1', message('m1', false, false, { inSent: true }), 'send')
+      index.replaceAccount('account-1', [message('m1', false, false, { inTrash: true })], 'trash-read', false)
+      expect(index.mailboxConversations('sent', 'all')).toEqual([])
+      expect(index.reconcileStream('account-1', 'trash', [], 'deleted').removed).toBe(1)
+      index.confirmSent('account-1', message('m2', false, false, { inSent: true }), 'send-2')
+      index.forgetMessages('account-1', ['m2'])
+      expect(index.messages()).toEqual([])
+      index.confirmSent('account-1', message('m3', false, false, { inSent: true }), 'send-3')
+      index.replaceAccount('account-1', [], 'history-delete', false, { email: 'work@example.com', historyId: '10', deletedIds: ['m3'] })
+      expect(index.messages()).toEqual([])
+    } finally { index.close() }
+  })
+  it('bounds search lag protection so absent mail cannot remain pinned indefinitely', () => {
+    const index = new GmailIndex(':memory:')
+    const now = Date.now(); const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+    try {
+      index.confirmSent('account-1', message('m1', false, false, { inSent: true }), 'send')
+      clock.mockReturnValue(now + 30 * 60_000)
+      expect(index.reconcileStream('account-1', 'sent', [], 'after-expiry').removed).toBe(1)
+      index.confirmSent('account-1', message('m2', false, false, { inSent: true }), 'send-2')
+      clock.mockReturnValue(now + 60 * 60_000)
+      index.replaceAccount('account-1', [], 'full-after-expiry', true)
+      expect(index.messages()).toEqual([])
+    } finally { clock.mockRestore(); index.close() }
+  })
+})
 
 describe('GmailIndex', () => {
   it('keeps unread archives out of Inbox across partial sync and restart, with a durable command', () => {

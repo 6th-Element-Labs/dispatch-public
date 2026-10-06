@@ -156,6 +156,7 @@ export class GmailIndex {
       CREATE TABLE IF NOT EXISTS gmail_history_baseline_rows (account_id TEXT NOT NULL, id TEXT NOT NULL, ready INTEGER NOT NULL DEFAULT 0, payload TEXT, PRIMARY KEY(account_id,id));
       CREATE TABLE IF NOT EXISTS gmail_direct_sync_disabled (account_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS gmail_unread_overlay (key TEXT PRIMARY KEY, unread INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS gmail_sent_search_pending (account_id TEXT NOT NULL, id TEXT NOT NULL, flag TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(account_id,id,flag));
       CREATE TABLE IF NOT EXISTS gmail_action_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, payload TEXT NOT NULL, error TEXT);
       CREATE TABLE IF NOT EXISTS gmail_messages (
         account_id TEXT NOT NULL,
@@ -303,11 +304,17 @@ export class GmailIndex {
     this.replaceAccount(accountId, messages, `history:${historyId}`, complete, { email, historyId, deletedIds })
   }
 
-  replaceAccount(accountId: string, messages: readonly IndexedGmailMessage[], runId: string, complete: boolean, history?: { email: string; historyId: string; deletedIds: readonly string[] }): void {
+  /** Gmail has returned the actual Sent message; its search streams may lag that read. */
+  confirmSent(accountId: string, message: IndexedGmailMessage, runId: string): void {
+    this.replaceAccount(accountId, [message], runId, false, undefined, true)
+  }
+
+  replaceAccount(accountId: string, messages: readonly IndexedGmailMessage[], runId: string, complete: boolean, history?: { email: string; historyId: string; deletedIds: readonly string[] }, confirmedSend = false): void {
     const unreadBefore = new Map(this.#acceptedUnread)
     const actionsBefore = new Map(this.#acceptedActions)
     this.#db.exec('BEGIN IMMEDIATE')
     try {
+      this.#db.prepare('DELETE FROM gmail_sent_search_pending WHERE expires_at<=?').run(Date.now())
       const upsert = this.#db.prepare(`
         INSERT INTO gmail_messages (
           account_id, id, thread_id, account_label, sender_name, sender_address, sender_initials,
@@ -325,6 +332,8 @@ export class GmailIndex {
           in_trash=excluded.in_trash, has_attachment=excluded.has_attachment, sync_run_id=excluded.sync_run_id
       `)
       for (const message of messages) {
+        // A subsequent message read is authoritative, including Trash/Spam.
+        this.#db.prepare('DELETE FROM gmail_sent_search_pending WHERE account_id=? AND id=?').run(accountId, message.id)
         upsert.run(
           accountId, message.id, message.threadId, message.accountLabel ?? '',
           message.sender.name, message.sender.address, message.sender.initials,
@@ -333,8 +342,14 @@ export class GmailIndex {
           Number(message.inSent), Number(message.inDrafts), Number(message.inArchive),
           Number(message.inSpam), Number(message.inTrash), Number(message.hasAttachment === true), runId,
         )
+        if (confirmedSend && message.inSent) {
+          const protect = this.#db.prepare('INSERT INTO gmail_sent_search_pending VALUES (?,?,?,?)')
+          for (const flag of ['sent', 'inbox', 'unread'] as const) {
+            if (flag === 'sent' || (flag === 'inbox' ? message.inInbox : message.unread)) protect.run(accountId, message.id, flag, Date.now() + 30 * 60_000)
+          }
+        }
       }
-      if (complete) this.#db.prepare('DELETE FROM gmail_messages WHERE account_id = ? AND sync_run_id <> ? AND NOT EXISTS (SELECT 1 FROM gmail_action_overlay WHERE key=account_id || char(0) || id) AND NOT EXISTS (SELECT 1 FROM gmail_unread_overlay WHERE key=account_id || char(0) || id)').run(accountId, runId)
+      if (complete) this.#db.prepare('DELETE FROM gmail_messages WHERE account_id = ? AND sync_run_id <> ? AND NOT EXISTS (SELECT 1 FROM gmail_action_overlay WHERE key=account_id || char(0) || id) AND NOT EXISTS (SELECT 1 FROM gmail_unread_overlay WHERE key=account_id || char(0) || id) AND NOT EXISTS (SELECT 1 FROM gmail_sent_search_pending p WHERE p.account_id=gmail_messages.account_id AND p.id=gmail_messages.id AND p.expires_at>?)').run(accountId, runId, Date.now())
       this.#reapplyAcceptedUnread(accountId, messages)
       this.#reapplyAcceptedActions(accountId, messages)
       if (history) {
@@ -347,6 +362,7 @@ export class GmailIndex {
           else this.#db.prepare('UPDATE gmail_action_queue SET payload=? WHERE id=?').run(JSON.stringify({ messageIds: remaining, action: job.action }), job.id)
         }
         for (const id of history.deletedIds) {
+          this.#db.prepare('DELETE FROM gmail_sent_search_pending WHERE account_id=? AND id=?').run(accountId, id)
           this.#db.prepare('DELETE FROM gmail_messages WHERE account_id=? AND id=?').run(accountId, id)
           const key = `${accountId}\0${id}`
           this.#db.prepare('DELETE FROM gmail_unread_overlay WHERE key=?').run(key)
@@ -383,6 +399,9 @@ export class GmailIndex {
     // detail but the list omits is a conflict (it changed in between): left as read, and counted.
     const column = STREAM_COLUMNS[flag]
     const present = new Set(presentIds)
+    // A listed ID acknowledges this stream even when no new detail read was needed.
+    const acknowledge = this.#db.prepare('DELETE FROM gmail_sent_search_pending WHERE account_id=? AND id=? AND flag=?')
+    for (const id of present) acknowledge.run(accountId, id, flag)
     const rows = this.#db.prepare(`SELECT id, sync_run_id FROM gmail_messages WHERE account_id = ? AND ${column} = 1${window.scope ? ` AND ${STREAM_COLUMNS[window.scope]} = 1` : ''}`)
       .all(accountId) as unknown as Array<{ id: string; sync_run_id: string }>
     const absent = rows.filter((row) => !present.has(row.id))
@@ -398,6 +417,7 @@ export class GmailIndex {
     this.#db.exec('BEGIN IMMEDIATE')
     try {
       for (const id of stale) {
+        if (this.#sentSearchPending(accountId, id, flag)) continue
         if (this.#acceptedActions.has(`${accountId}\0${id}`)) continue
         if (flag === 'unread' && this.#acceptedUnread.has(`${accountId}\0${id}`)) continue
         cleared += Number(clear.run(accountId, id).changes)
@@ -425,6 +445,7 @@ export class GmailIndex {
     for (const id of messageIds) {
       const row = rows.get(id)
       if (!row?.flags[flag] || (scope && !row.flags[scope]) || row.pending) continue
+      if (this.#sentSearchPending(accountId, id, flag)) continue
       if ((runOf.get(accountId, id) as { sync_run_id: string }).sync_run_id === runId) { conflicts++; continue }
       cleared += Number(clear.run(accountId, id).changes)
     }
@@ -437,6 +458,7 @@ export class GmailIndex {
     const unread = this.#db.prepare('DELETE FROM gmail_unread_overlay WHERE key = ?')
     const action = this.#db.prepare('DELETE FROM gmail_action_overlay WHERE key = ?')
     for (const id of messageIds) {
+      this.#db.prepare('DELETE FROM gmail_sent_search_pending WHERE account_id=? AND id=?').run(accountId, id)
       const key = `${accountId}\0${id}`
       remove.run(accountId, id); unread.run(key); action.run(key)
       this.#acceptedUnread.delete(key); this.#acceptedActions.delete(key)
@@ -452,9 +474,14 @@ export class GmailIndex {
     for (const { id } of rows) {
       const key = `${accountId}\0${id}`
       if (this.#acceptedActions.has(key) || this.#acceptedUnread.has(key)) continue
+      if (this.#sentSearchPending(accountId, id)) continue
       removed += Number(remove.run(accountId, id).changes)
     }
     return removed
+  }
+
+  #sentSearchPending(accountId: string, id: string, flag?: IndexStreamFlag): boolean {
+    return !!this.#db.prepare(`SELECT 1 FROM gmail_sent_search_pending WHERE account_id=? AND id=? AND expires_at>?${flag ? ' AND flag=?' : ''} LIMIT 1`).get(accountId, id, Date.now(), ...(flag ? [flag] : []))
   }
 
   /** What the index holds for these messages: folder flags, date, and whether a local change awaits Gmail. */
@@ -480,6 +507,7 @@ export class GmailIndex {
     if (accountIds.length === 0) throw new Error('Cannot prune Gmail index without an authoritative account list')
     const placeholders = accountIds.map(() => '?').join(', ')
     this.#db.prepare(`DELETE FROM gmail_messages WHERE account_id NOT IN (${placeholders})`).run(...accountIds)
+    this.#db.prepare(`DELETE FROM gmail_sent_search_pending WHERE account_id NOT IN (${placeholders})`).run(...accountIds)
     this.#db.prepare(`DELETE FROM gmail_history_checkpoint WHERE account_id NOT IN (${placeholders})`).run(...accountIds)
     this.#db.prepare(`DELETE FROM gmail_direct_sync_disabled WHERE account_id NOT IN (${placeholders})`).run(...accountIds)
     this.#db.prepare(`DELETE FROM gmail_history_baseline WHERE account_id NOT IN (${placeholders})`).run(...accountIds)
