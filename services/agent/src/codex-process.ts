@@ -115,9 +115,16 @@ export class CodexProcess {
     }
     process.on('error', (error) => handleFailure(new Error(`Could not start Codex App Server: ${error.message}`)))
     process.on('exit', (code, signal) => handleFailure(new Error(`Codex App Server exited (${code ?? signal ?? 'unknown'})`)))
+    // A child can close stdin before Node delivers its exit event. Writable
+    // errors are emitted asynchronously; a try/catch around RPC.write cannot
+    // prevent an unhandled EPIPE from terminating the whole agent service.
+    process.stdin.on('error', (error) => {
+      handleFailure(new Error(`Codex App Server input failed: ${error.message}`))
+      if (!process.killed && process.exitCode === null && process.signalCode === null) process.kill('SIGTERM')
+    })
     try {
       await rpc.request('initialize', {
-        clientInfo: { name: 'dispatch', title: 'Dispatch', version: '0.1.7' },
+        clientInfo: { name: 'dispatch', title: 'Dispatch', version: '0.1.9' },
         capabilities: { mcpServerOpenaiFormElicitation: true },
       })
     } catch (error) {

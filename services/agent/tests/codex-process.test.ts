@@ -80,4 +80,26 @@ describe('CodexProcess', () => {
     await expect(codex.ready()).rejects.toThrow(/Codex App Server/)
     expect(codex.nextRestartDelayMs()).toBeGreaterThan(500)
   })
+
+  it('recovers when the App Server closes its input before the initialized notification', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dispatch-codex-pipe-')); roots.push(root)
+    const command = join(root, 'codex')
+    const marker = join(root, 'started')
+    await writeFile(command, `#!${process.execPath}\nconst fs=require('node:fs');
+const first=!fs.existsSync(${JSON.stringify(marker)});fs.writeFileSync(${JSON.stringify(marker)},'started');
+const rl=require('node:readline').createInterface({input:process.stdin});
+rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;
+if(first&&m.method==='initialize'){fs.closeSync(0);process.stdout.write(JSON.stringify({id:m.id,result:'first'})+'\\n');setInterval(()=>{},1000);}
+else process.stdout.write(JSON.stringify({id:m.id,result:'recovered'})+'\\n');});\n`)
+    await chmod(command, 0o755)
+    const codex = new CodexProcess(command); processes.push(codex)
+    const events: string[] = []
+    codex.subscribe(message => { if (message.method) events.push(message.method) })
+    await codex.ready()
+    await vi.waitFor(() => expect(codex.lastError()).toMatch(/Codex App Server input failed:.*EPIPE/))
+    expect(events.filter(event => event === 'dispatch/appServerDisconnected')).toHaveLength(1)
+    expect(await codex.request('model/list')).toBe('recovered')
+    expect(events).toContain('dispatch/appServerReconnected')
+    expect(codex.lastError()).toBeNull()
+  })
 })
