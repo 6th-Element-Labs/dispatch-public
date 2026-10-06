@@ -124,8 +124,10 @@ test('print layout keeps long formatted emails and escaped headers without clien
   await expect(page.locator('#dispatch-email-print button')).toHaveCount(0)
   await page.emulateMedia({ media: 'print' })
   await expect(page.locator('#app')).toBeHidden()
-  const metrics = await page.locator('#dispatch-email-print').evaluate(node => ({ height: node.getBoundingClientRect().height, overflow: getComputedStyle(node).overflow }))
+  const metrics = await page.locator('#dispatch-email-print').evaluate(node => ({ height: node.getBoundingClientRect().height, left: node.getBoundingClientRect().left, width: node.getBoundingClientRect().width, viewport: window.innerWidth, overflow: getComputedStyle(node).overflow }))
   expect(metrics.height).toBeGreaterThan(900)
+  expect(metrics.left).toBe(0)
+  expect(metrics.width).toBeLessThanOrEqual(metrics.viewport)
   expect(metrics.overflow).toBe('visible')
 })
 

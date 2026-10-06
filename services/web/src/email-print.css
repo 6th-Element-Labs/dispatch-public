@@ -1,7 +1,7 @@
 #dispatch-email-print { display: none; }
 @media print {
   @page { margin: 15mm; }
-  html, body { height: auto !important; min-height: 0 !important; overflow: visible !important; background: white !important; color: black !important; color-scheme: light !important; }
+  html, body { display: block !important; position: static !important; width: auto !important; min-width: 0 !important; height: auto !important; min-height: 0 !important; margin: 0 !important; padding: 0 !important; overflow: visible !important; background: white !important; color: black !important; color-scheme: light !important; }
   body > :not(#dispatch-email-print) { display: none !important; }
   #dispatch-email-print { display: block !important; width: auto !important; max-width: none !important; margin: 0 !important; padding: 0 !important; color: black; font: 11pt/1.45 -apple-system, BlinkMacSystemFont, sans-serif; overflow-wrap: anywhere; }
   #dispatch-email-print > header { margin-bottom: 1.5em; padding-bottom: 1em; border-bottom: 1px solid #bbb; break-inside: avoid; }
