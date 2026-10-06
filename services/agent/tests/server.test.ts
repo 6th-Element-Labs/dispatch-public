@@ -857,11 +857,19 @@ describe('connector threads', () => {
     })
     expect((await fetch(`${local}/v1/connectors/gmail/drafts/create`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ linkId: 'link-one', to: 'a@b.c', subject: 'Hi', bodyMarkdown: 'Hi', bodyHtml: '<p>Hi</p>' }) })).status).toBe(200)
     for (const listener of listeners) listener({ id: 9, method: 'mcpServer/elicitation/request', params: { threadId: 'connector-thread', message: 'Allow Gmail to run tool "gmail.update_draft"?' } })
-    for (const listener of listeners) listener({ id: 10, method: 'mcpServer/elicitation/request', params: { threadId: 'user-thread', message: 'Allow?' } })
     for (const listener of listeners) listener({ id: 11, method: 'item/permissions/requestApproval', params: { threadId: 'connector-thread' } })
+    for (const listener of listeners) listener({ id: 12, method: 'item/tool/requestApproval', params: { threadId: 'connector-thread' } })
     expect(fake.respond).toHaveBeenCalledWith(9, { action: 'accept', content: {} })
     expect(fake.respond).toHaveBeenCalledWith(11, { decision: 'accept' })
+    expect(fake.respond).toHaveBeenCalledWith(12, { decision: 'accept' })
+    // Some App Server versions do not emit serverRequest/resolved for these
+    // direct connector calls. Answered prompts must still release idle handoff.
+    expect(await (await fetch(`${local}/v1/runtime`)).json()).toMatchObject({ activeOperations: 0 })
+    expect(fake.setIdleGuard.mock.calls.at(-1)![0]()).toBe(true)
+    for (const listener of listeners) listener({ id: 10, method: 'mcpServer/elicitation/request', params: { threadId: 'user-thread', message: 'Allow?' } })
     expect(fake.respond).not.toHaveBeenCalledWith(10, expect.anything())
+    expect(await (await fetch(`${local}/v1/runtime`)).json()).toMatchObject({ activeOperations: 1 })
+    expect(fake.setIdleGuard.mock.calls.at(-1)![0]()).toBe(false)
     void base
   })
 })

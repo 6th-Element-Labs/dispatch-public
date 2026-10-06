@@ -267,6 +267,10 @@ export function createAgentServer(runtime: AgentRuntime, options: { bindings?: C
     if (!params?.threadId || !serviceThreadIds.has(params.threadId)) return
     if (message.method === 'mcpServer/elicitation/request') runtime.respond(message.id, { action: 'accept', content: {} })
     else if (message.method === 'item/permissions/requestApproval' || message.method === 'item/tool/requestApproval') runtime.respond(message.id, { decision: 'accept' })
+    else return
+    // We answered this connector request. Do not depend on a separate
+    // serverRequest/resolved notification to release the runtime's idle guard.
+    if (activity.resolve(message.id)) publishActivity()
   })
 
   const inventory = async (): Promise<GmailInventory> => {
