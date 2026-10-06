@@ -124,7 +124,7 @@ export class CodexProcess {
     })
     try {
       await rpc.request('initialize', {
-        clientInfo: { name: 'dispatch', title: 'Dispatch', version: '0.1.9' },
+        clientInfo: { name: 'dispatch', title: 'Dispatch', version: '0.1.10' },
         capabilities: { mcpServerOpenaiFormElicitation: true },
       })
     } catch (error) {

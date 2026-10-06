@@ -349,22 +349,23 @@ test('opens folders from the toolbar popover and keeps the account scope in the 
 })
 
 test('shows a live Tabler activity indicator while Codex is working', async ({ page }) => {
+  await stubAgent(page)
+  await page.addInitScript(() => {
+    class ActivityEvents {
+      static CLOSED = 2; readyState = 1; onopen: any; onmessage: any; onerror: any
+      constructor(url: string) {
+        if (url.includes('/v1/events?')) (window as any).activityEvents = this
+        setTimeout(() => this.onopen?.({}), 0)
+      }
+      close() { this.readyState = 2 }
+    }
+    ;(window as any).EventSource = ActivityEvents
+  })
   await page.goto('/')
-  await page.evaluate(() => {
-    const status = document.querySelector('[data-agent-status]')
-    if (!status) return
-    status.setAttribute('data-status', 'Working')
-    status.setAttribute('title', 'Working')
-    status.setAttribute('aria-label', 'Working')
-  })
+  await expect(page.locator('[data-agent-status]')).toHaveAttribute('data-status', 'Connected')
+  await page.evaluate(() => (window as any).activityEvents.onmessage({ data: JSON.stringify({ method: 'turn/started', params: { turn: { id: 'activity-turn', status: 'inProgress' } } }) }))
   await expect(page.locator('[data-agent-activity]')).toBeVisible()
-  await page.evaluate(() => {
-    const status = document.querySelector('[data-agent-status]')
-    if (!status) return
-    status.setAttribute('data-status', 'Connected')
-    status.setAttribute('title', 'Connected')
-    status.setAttribute('aria-label', 'Connected')
-  })
+  await page.evaluate(() => (window as any).activityEvents.onmessage({ data: JSON.stringify({ method: 'turn/completed', params: { turn: { id: 'activity-turn', status: 'completed' } } }) }))
   await expect(page.locator('[data-agent-activity]')).toBeHidden()
 })
 
@@ -4098,6 +4099,25 @@ test('rich draft formatting survives saving and reopening', async ({ page }) => 
   await expect(body.locator('a')).toHaveAttribute('href', 'https://example.com/review')
 })
 
+test('rich-editor saves preserve bare URLs with underscores through subsequent edits', async ({ page }) => {
+  await gmailMail()(page)
+  const url = 'https://example.com/slides?slide=deck_0_829#slide=deck_0_829'
+  const saved: Record<string, unknown>[] = []
+  await page.route('http://127.0.0.1:8411/v1/draft-saves', route => {
+    const fields = route.request().postDataJSON(); saved.push(fields)
+    return route.fulfill({ status: 202, json: { draft: draftProjectionFromCommand(fields, 'url-one') } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Compose', exact: true }).click()
+  const body = page.getByRole('textbox', { name: 'Draft body' })
+  await body.fill(url)
+  await expect.poll(() => String(saved.at(-1)?.bodyMarkdown)).toBe(url)
+  await body.press('End'); await body.press('Enter'); await body.pressSequentially('More text')
+  await expect.poll(() => String(saved.at(-1)?.bodyMarkdown)).toContain('More text')
+  expect(String(saved.at(-1)?.bodyMarkdown)).toContain(url)
+  expect(String(saved.at(-1)?.bodyMarkdown)).not.toContain('\\_')
+})
+
 test('popping out a draft transfers unsaved formatting, recipients and attachments', async ({ page }) => {
   await gmailMail({ draftStatus: 502 })(page)
   await page.addInitScript(() => {
@@ -4556,6 +4576,35 @@ for (const scenario of ['clean', 'late-edit', 'different-draft', 'without-tool-e
   await held!.fulfill({ json: { receipt: { id: 'confirmed', accountId: 'one', draftId: 'gmail-remote', status: 'verified', messageId: 'sent-id' } } })
   if (scenario === 'late-edit' || scenario === 'different-draft') await expect(page.locator('[data-draft-body]')).toHaveText(scenario === 'late-edit' ? 'Keep my later edit' : 'Different message')
   else await expect(page.locator('[data-draft]')).toBeHidden()
+})
+
+for (const matches of [true, false]) test(`a recovered sent editor is consumed only when Mail confirms the complete snapshot (matches=${matches})`, async ({ page }) => {
+  await page.clock.install()
+  await stubAgent(page)
+  await page.addInitScript(() => localStorage.setItem('dispatch.editor-recovery.v1', JSON.stringify([{ key: 'editor-key', updatedAt: '2026-10-06T00:00:00Z', revision: 5, accountId: 'one', gmailDraftId: 'queued-codex-key', gmailThreadId: 'thread', inReplyToMessageId: '', to: 'test@example.com', cc: '', bcc: '', subject: 'Already sent recovery', bodyMarkdown: 'Visible reply', attachments: [] }])))
+  await page.route('http://127.0.0.1:8411/v1/accounts', route => route.fulfill({ json: { accounts: [{ id: 'one', name: 'Test', email: 'test@example.com' }] } }))
+  await page.route('http://127.0.0.1:8411/v1/draft-saves', route => route.fulfill({ status: 400, json: { error: 'gmail_draft_sent', detail: 'This draft was already sent.' } }))
+  let comparisons = 0
+  let held: import('@playwright/test').Route | undefined
+  await page.route(/8411\/v1\/drafts\/queued-codex-key\/send-status/, route => {
+    if (route.request().method() === 'POST') { comparisons++; return route.fulfill({ json: { matches } }) }
+    held = route
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Drafts', exact: true }).click()
+  await page.locator('[data-local-draft-key="editor-key"]').click()
+  await expect(page.locator('[data-draft-body]')).toHaveText('Visible reply')
+  await page.clock.fastForward(5000)
+  await expect.poll(() => Boolean(held)).toBe(true)
+  await held!.fulfill({ json: { receipt: { id: 'confirmed', accountId: 'one', draftId: 'gmail-remote', status: 'verified', messageId: 'sent-id' } } })
+  await expect.poll(() => comparisons).toBeGreaterThan(0)
+  if (matches) {
+    await expect(page.locator('[data-draft]')).toBeHidden()
+    await expect.poll(async () => (await localRecovery(page)).length).toBe(0)
+  } else {
+    await expect(page.locator('[data-draft-body]')).toHaveText('Visible reply')
+    expect((await localRecovery(page)).length).toBe(1)
+  }
 })
 
 test('EA shows a fixed newspaper with separate later updates and dated history',async({page})=>{

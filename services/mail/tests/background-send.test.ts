@@ -2,6 +2,7 @@ import { expect, it } from 'vitest'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { GmailConnectorProvider } from '../src/gmail-provider.js'
+import { vi } from 'vitest'
 
 it.each(['accepted', 'unknown', 'save-failed', 'rejected'])('background Send accepts immediately, preserves the submitted reply and does not replay %s', async outcome => {
   let releaseCreate!: () => void
@@ -86,5 +87,23 @@ it('resolves an externally sent Gmail draft back to its saved queue identity and
     await expect(provider.readGmailDraft('one', draft.id)).rejects.toMatchObject({ code: 'gmail_draft_not_found' })
     await expect(provider.readGmailDraft('one', 'gmail-remote')).rejects.toMatchObject({ code: 'gmail_draft_not_found' })
     expect(provider.beginGmailDraftSend('one', draft.id).id).toBe(receipt.id)
+    expect(() => provider.enqueueDraftSave('one', '', { bodyMarkdown: 'Stale recovered draft' }, draft.id, 'new-editor')).toThrow('already sent')
   } finally { provider.stopBackgroundSync(); await new Promise<void>(resolve => server.close(() => resolve())) }
+})
+
+it('consumes recovery only when Sent contains the same recipients, full body and attachment bytes', async () => {
+  const provider = new GmailConnectorProvider('http://127.0.0.1:1', { indexPath: false, localPath: ':memory:', draftListLagMs: 0 })
+  const file = { name: 'proposal.pdf', mediaType: 'application/pdf', contentBase64: 'YWJj' }
+  const message = { id: 'sent', threadId: 'thread', sender: { address: 'me@example.com', name: 'Me', initials: 'M' }, to: [{ address: 'test@example.com', name: 'Test', initials: 'T' }], cc: [], bcc: [], subject: 'Reply', receivedAt: new Date().toISOString(), receivedLabel: '', receivedFullLabel: '', preview: '', unread: false, accountId: 'one', labels: ['SENT'], source: 'gmail' as const, body: { kind: 'sanitized-html' as const, content: '<p>Full <strong>reply</strong>.</p>' }, attachments: [{ id: 'file', name: file.name, mediaType: file.mediaType, sizeLabel: '3 B' }] }
+  vi.spyOn(provider, 'readMessage').mockResolvedValue(message)
+  vi.spyOn(provider, 'readAttachment').mockResolvedValue({ structuredContent: { base64_url_content: 'YWJj' } })
+  provider.recordExternalSend('one', 'sent', 'remote')
+  const fields = { to: 'test@example.com', cc: '', bcc: '', subject: 'Reply', bodyMarkdown: 'Full **reply**.', attachments: [file] }
+  try {
+    expect(await provider.sentDraftMatches('one', 'remote', fields)).toBe(true)
+    expect(await provider.sentDraftMatches('one', 'remote', { ...fields, bodyMarkdown: 'Full **reply**.\n\nNew unsent edits.' })).toBe(false)
+    expect(await provider.sentDraftMatches('one', 'remote', { ...fields, cc: 'other@example.com' })).toBe(false)
+    expect(await provider.sentDraftMatches('one', 'remote', { ...fields, attachments: [{ ...file, contentBase64: 'eHl6' }] })).toBe(false)
+    expect(await provider.sentDraftMatches('other', 'remote', fields)).toBe(false)
+  } finally { provider.stopBackgroundSync() }
 })

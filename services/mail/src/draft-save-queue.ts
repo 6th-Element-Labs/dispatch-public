@@ -1,8 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { projectDraft } from './draft.js'
 import { draftChanges } from './draft-conflict.js'
-import { renderDraftMarkdown } from './draft-markdown.js'
-import TurndownService from 'turndown'
+import { normalizedDraftBody } from './draft-markdown.js'
 import type { DraftAttachment, DraftProjection } from './model.js'
 import type { LocalMailStore } from './local-mail-store.js'
 
@@ -37,9 +36,7 @@ export interface DraftSaveGateway {
 }
 
 const addresses = (value = '') => value.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(address => address.trim()).filter(Boolean).map(value => ({ address: value.match(/<([^>]+)>/)?.[1] ?? value, name: value, initials: '@' }))
-const markdown = new TurndownService({ headingStyle: 'atx', bulletListMarker: '-', codeBlockStyle: 'fenced' })
-markdown.keep(['table', 'sub', 'sup'])
-const normalized = (value = '') => markdown.turndown(renderDraftMarkdown(value)).replaceAll('\r\n', '\n').trim()
+const normalized = (value = '') => normalizedDraftBody(value)
 const addressKey = (value = '') => addresses(value).map(item => item.address.toLowerCase()).sort().join(',')
 const hashBytes = (value: string) => createHash('sha256').update(Buffer.from(value, 'base64')).digest('hex')
 const hasBytes = (file: DraftAttachment): file is DraftAttachment & { contentBase64: string } => file.contentBase64 !== undefined
@@ -180,7 +177,14 @@ export class DraftSaveQueue {
   pending(accountId?: string): DraftSaveJob[] { return this.store.draftSaves().filter(job => ['pending', 'failed'].includes(job.state) && (!accountId || job.accountId === accountId)) }
 
   enqueue(accountId: string, messageId: string, fields: DraftSaveFields, remoteId?: string, seed?: DraftProjection, clientDraftId?: string): DraftProjection {
-    let prior = clientDraftId ? this.store.draftSave(accountId, `queued-${clientDraftId}`) : remoteId ? this.store.draftSave(accountId, remoteId) ?? this.store.draftSaves().find(job => job.accountId === accountId && job.remoteId === remoteId && job.state !== 'cancelled') : this.pending(accountId).find(job => !job.remoteId && job.messageId === messageId && JSON.stringify(job.fields) === JSON.stringify(fields))
+    // The editor recovery UUID and Codex creation UUID need not be the same.
+    // A supplied draft ID identifies the existing record; a recovery key only
+    // supplies an idempotent identity when creating a new draft.
+    const identified = remoteId ? this.store.draftSave(accountId, remoteId) ?? this.store.draftSaves().find(job => job.accountId === accountId && job.remoteId === remoteId && job.state !== 'cancelled') : undefined
+    const client = clientDraftId ? this.store.draftSave(accountId, `queued-${clientDraftId}`) : undefined
+    if (identified && client && identified.id !== client.id) throw new Error('Draft identities refer to different drafts')
+    if (remoteId && client && !identified && client.remoteId !== remoteId && client.id !== remoteId) throw new Error('Draft identities refer to different drafts')
+    const prior = identified ?? client ?? (!remoteId && !clientDraftId ? this.pending(accountId).find(job => !job.remoteId && job.messageId === messageId && JSON.stringify(job.fields) === JSON.stringify(fields)) : undefined)
     if (remoteId?.startsWith('queued-') && !prior) throw new Error('Queued draft was not found')
     if (prior?.state === 'cancelled') throw new Error('Draft was discarded')
     const id = prior?.id ?? `queued-${clientDraftId ?? randomUUID()}`
@@ -311,7 +315,20 @@ export class DraftSaveQueue {
     const job = this.store.draftSave(accountId, id)
     if (!job || job.state === 'cancelled') throw Object.assign(new Error('Draft was discarded'), { code: 'gmail_draft_not_found' })
     if (job.state !== 'saved' || !job.remoteId) return this.projection(job)
-    return { ...await this.gateway.read(accountId, job.remoteId), resolvedFromDraftId: id, draftRevision: job.revision }
+    const fresh = await this.gateway.read(accountId, job.remoteId)
+    if (fresh.accountId !== accountId || !fresh.id) throw new Error('Gmail returned a different draft account or missing identity')
+    if (fresh.id !== job.remoteId) {
+      const latest = this.store.draftSave(accountId, id)
+      // Gmail can replace a saved draft. Record the confirmed alias without
+      // overwriting a newer local edit or cancellation accepted during the read.
+      if (latest && latest.state !== 'cancelled' && latest.remoteId === job.remoteId) {
+        this.store.putDraftSave({ ...latest, remoteId: fresh.id,
+          ...(latest.state === 'saved' && latest.revision === job.revision ? { draft: { ...fresh, id } } : {}),
+          base: latest.base ? { ...latest.base, id: fresh.id } : undefined })
+        this.changed()
+      }
+    }
+    return { ...fresh, resolvedFromDraftId: id, draftRevision: job.revision }
   }
   async discard(accountId: string, id: string): Promise<void> {
     const job = this.store.draftSave(accountId, id)

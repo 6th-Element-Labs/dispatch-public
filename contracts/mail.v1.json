@@ -249,6 +249,81 @@
         }
       },
       "additionalProperties": false
+    },
+    "sentDraftSnapshotCommand": {
+      "type": "object",
+      "required": [
+        "to",
+        "cc",
+        "bcc",
+        "subject",
+        "bodyMarkdown",
+        "attachments"
+      ],
+      "properties": {
+        "to": {
+          "type": "string"
+        },
+        "cc": {
+          "type": "string"
+        },
+        "bcc": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "bodyMarkdown": {
+          "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "mediaType"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "mediaType": {
+                "type": "string"
+              },
+              "contentBase64": {
+                "type": "string"
+              },
+              "sourceMessageId": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "contentId": {
+                "type": "string"
+              },
+              "sizeLabel": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "sentDraftSnapshotResult": {
+      "type": "object",
+      "required": [
+        "matches"
+      ],
+      "properties": {
+        "matches": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

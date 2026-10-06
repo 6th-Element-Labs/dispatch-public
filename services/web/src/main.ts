@@ -511,7 +511,17 @@ async function syncPendingDrafts(): Promise<void> {
     backgroundDraftSaves.set(record.key, save)
     try { await save; draftSyncDelay = 3000 }
     catch (error) {
-      if (requestErrorCode(String(error)) === 'gmail_draft_not_found' && record.gmailDraftId) {
+      if (requestErrorCode(String(error)) === 'gmail_draft_sent' && record.gmailDraftId) {
+        try {
+          const restored = await recovery.restore(record.key)
+          const current = restored.record
+          if (!restored.missing.length && await api.sentDraftMatches(current.gmailDraftId, current.accountId!, { to: current.to, cc: current.cc, bcc: current.bcc, subject: current.subject, bodyMarkdown: current.bodyMarkdown, attachments: restored.attachments })) {
+            recovery.removeSavedRevision(current.key, current.revision)
+            draftSyncErrors.delete(current.key)
+          } else draftSyncErrors.set(current.key, 'This email was sent. Later edits are kept on this device.')
+        } catch { pending = true }
+        renderRecoveryList()
+      } else if (requestErrorCode(String(error)) === 'gmail_draft_not_found' && record.gmailDraftId) {
         // Gmail replaced or dropped the draft under us: forget the ghost id and let the next pass create or re-find it.
         recovery.clearGmailIdentity(record.key, record.accountId!)
         pending = true
@@ -2714,7 +2724,7 @@ function sendDraft(): void {
   const changed = !draft.id || draftDirty
   const fields = { accountId, clientDraftId: key, draftId: draft.id || undefined, messageId: draft.inReplyToMessageId,
     ...(changed ? { to: snapshot.to.map(item => item.address).join(', '), cc: snapshot.cc, bcc: snapshot.bcc, subject: snapshot.subject, bodyMarkdown: snapshot.bodyMarkdown,
-      ...(!draft.id || draftAttachmentsChanged ? { attachments: snapshot.attachments } : {}),
+      attachments: snapshot.attachments,
       ...(draftBase?.id === draft.id ? { base: baselineSnapshot(draftBase) } : {}) } : {}) }
   pendingDraftSends.add(key)
   hideDraftEditor()
@@ -3492,17 +3502,23 @@ function handleAgentEvent(message: AgentEvent): void {
 }
 
 let sentDraftRefresh = false
-/** Mail resolves queued/Gmail aliases; only a confirmed send can consume a clean editor. */
+let unmatchedSentDraft: { session: number; revision: number } | undefined
+/** Confirmed sends consume clean editors or complete recovery snapshots matching Sent. */
 async function reconcileSentDraft(): Promise<boolean> {
   const draft = activeDraft
-  if (!draft?.id || !draft.accountId || offlineMode || sentDraftRefresh || draftDirty || draftSaveFlight || draftIsSending() || draftDiscarding) return false
+  if (!draft?.id || !draft.accountId || offlineMode || sentDraftRefresh || draftSaveFlight || draftIsSending() || draftDiscarding) return false
   const session = draftEditSession
   const revision = draftEditRevision
+  if (unmatchedSentDraft?.session === session && unmatchedSentDraft.revision === revision) return false
   sentDraftRefresh = true
   try {
     const receipt = await api.sentDraftStatus(draft.id, draft.accountId)
     if (!receipt || receipt.accountId !== draft.accountId || !['accepted', 'verified'].includes(receipt.status)) return false
-    if (session !== draftEditSession || revision !== draftEditRevision || activeDraft?.id !== draft.id || activeDraft.accountId !== draft.accountId || draftDirty || draftSaveFlight || draftDiscarding) return false
+    if (draftDirty) {
+      const matches = await api.sentDraftMatches(draft.id, draft.accountId, { to: recipientValue(elements.draftTo), cc: recipientValue(elements.draftCc), bcc: recipientValue(elements.draftBcc), subject: elements.draftSubject.value, bodyMarkdown: elements.draftBody.value, attachments: draft.attachments })
+      if (!matches) { if (receipt.status === 'verified') unmatchedSentDraft = { session, revision }; return false }
+    }
+    if (session !== draftEditSession || revision !== draftEditRevision || activeDraft?.id !== draft.id || activeDraft.accountId !== draft.accountId || draftSaveFlight || draftDiscarding) return false
     clearRecovery()
     hideDraftEditor()
     void refreshMailboxCounts()

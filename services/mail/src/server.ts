@@ -39,7 +39,7 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
 }
 
-type GmailProvider = Pick<GmailConnectorProvider, 'accounts' | 'listMessages' | 'listUnifiedMessages' | 'readMessage' | 'listConversations' | 'listUnifiedConversations' | 'readConversation'> & Partial<Pick<GmailConnectorProvider, 'workChanges' | 'readWorkConversation' | 'directSyncStatus' | 'connectDirectSync' | 'useConnectorSync' | 'startBackgroundSync' | 'stopBackgroundSync' | 'syncStatus' | 'syncNow' | 'refreshNow' | 'setConversationUnread' | 'searchConversations' | 'listMailboxConversations' | 'mailboxCounts' | 'listRecipients' | 'mutateConversation' | 'setRuntimeDraining' | 'enqueueDraftSave' | 'attachDraftFiles' | 'resolveDraftConflict' | 'conflictCopies' | 'createGmailDraft' | 'updateGmailDraft' | 'patchGmailDraft' | 'readGmailDraft' | 'openGmailDraft' | 'discardGmailDraft' | 'sendGmailDraft' | 'beginGmailDraftSend' | 'existingDraftSend' | 'backgroundSends' | 'failedSendDraft' | 'sendReceipts' | 'sendReceipt' | 'verifySendReceipt' | 'recordExternalSend' | 'cachedAccounts' | 'offlineStatus' | 'downloadedConversations' | 'startOfflineDownload' | 'cancelOfflineDownload' | 'readAttachment'>>
+type GmailProvider = Pick<GmailConnectorProvider, 'accounts' | 'listMessages' | 'listUnifiedMessages' | 'readMessage' | 'listConversations' | 'listUnifiedConversations' | 'readConversation'> & Partial<Pick<GmailConnectorProvider, 'workChanges' | 'readWorkConversation' | 'directSyncStatus' | 'connectDirectSync' | 'useConnectorSync' | 'startBackgroundSync' | 'stopBackgroundSync' | 'syncStatus' | 'syncNow' | 'refreshNow' | 'setConversationUnread' | 'searchConversations' | 'listMailboxConversations' | 'mailboxCounts' | 'listRecipients' | 'mutateConversation' | 'setRuntimeDraining' | 'enqueueDraftSave' | 'attachDraftFiles' | 'resolveDraftConflict' | 'conflictCopies' | 'createGmailDraft' | 'updateGmailDraft' | 'patchGmailDraft' | 'readGmailDraft' | 'openGmailDraft' | 'discardGmailDraft' | 'sendGmailDraft' | 'beginGmailDraftSend' | 'existingDraftSend' | 'sentDraftMatches' | 'backgroundSends' | 'failedSendDraft' | 'sendReceipts' | 'sendReceipt' | 'verifySendReceipt' | 'recordExternalSend' | 'cachedAccounts' | 'offlineStatus' | 'downloadedConversations' | 'startOfflineDownload' | 'cancelOfflineDownload' | 'readAttachment'>>
 
 function draftError(error: unknown, fallback: string): { error: string; detail: string } {
   const value = error as { code?: unknown; message?: unknown }
@@ -651,7 +651,13 @@ export function createMailServer(
         if (sending && Object.keys(fields).length && ![fields.to, fields.cc, fields.bcc].some(value => value?.trim())) return writeJson(response, 400, { error: 'draft_recipient_required' })
         if (sending) {
           const previous = gmail.existingDraftSend?.(body.accountId, draftId, body.clientDraftId as string | undefined)
-          if (previous) return writeJson(response, 202, { receipt: previous })
+          if (previous) {
+            if (Object.keys(fields).length && ['accepted', 'verified'].includes(previous.status)) {
+              const complete = ['to', 'cc', 'bcc', 'subject', 'bodyMarkdown', 'attachments'].every(key => fields[key as keyof typeof fields] !== undefined)
+              if (!draftId || !complete || !await gmail.sentDraftMatches?.(body.accountId, draftId, fields as Required<typeof fields>)) return writeJson(response, 409, { error: 'gmail_draft_sent', detail: 'This email was already sent. Your later edits are kept; they have not been sent.' })
+            }
+            return writeJson(response, 202, { receipt: previous })
+          }
         }
         const draft = !Object.keys(fields).length ? undefined : baseline
           ? gmail.enqueueDraftSave(body.accountId, typeof body.messageId === 'string' ? body.messageId : '', fields, draftId, body.clientDraftId as string | undefined, baseline)
@@ -712,6 +718,18 @@ export function createMailServer(
       }
     }
     const draftSendStatusMatch = /^\/v1\/drafts\/([^/]+)\/send-status$/.exec(url.pathname)
+    if (request.method === 'POST' && draftSendStatusMatch?.[1]) {
+      const accountId = url.searchParams.get('account')
+      if (!accountId) return writeJson(response, 400, { error: 'gmail_account_required' })
+      if (!gmail.sentDraftMatches) return writeJson(response, 501, { error: 'draft_reconciliation_unavailable' })
+      try {
+        const input = draftObject(await readJson(request))
+        if (!input || !['to', 'cc', 'bcc', 'subject', 'bodyMarkdown'].every(key => typeof input[key] === 'string')
+          || !Array.isArray(input.attachments) || draftAttachments(input.attachments).length !== input.attachments.length) return writeJson(response, 400, { error: 'complete_draft_snapshot_required' })
+        const fields = { to: input.to as string, cc: input.cc as string, bcc: input.bcc as string, subject: input.subject as string, bodyMarkdown: input.bodyMarkdown as string, attachments: draftAttachments(input.attachments) }
+        return writeJson(response, 200, { matches: await gmail.sentDraftMatches(accountId, decodeURIComponent(draftSendStatusMatch[1]), fields) })
+      } catch (error) { return writeJson(response, 502, draftError(error, 'draft_reconciliation_failed')) }
+    }
     if (request.method === 'GET' && draftSendStatusMatch?.[1]) {
       const accountId = url.searchParams.get('account')
       if (!accountId) return writeJson(response, 400, { error: 'gmail_account_required' })

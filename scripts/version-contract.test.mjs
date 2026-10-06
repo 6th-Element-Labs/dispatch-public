@@ -9,8 +9,8 @@ describe('release version contract', () => {
   it('reads one version from every shipped package', async () => {
     const records = await readVersions(root)
     assert.equal(records.length, 7)
-    assert.deepEqual([...new Set(records.map(record => record.version))], ['0.1.9'])
-    assert.doesNotThrow(() => assertOneVersion(records, '0.1.9'))
+    assert.deepEqual([...new Set(records.map(record => record.version))], ['0.1.10'])
+    assert.doesNotThrow(() => assertOneVersion(records, '0.1.10'))
   })
 
   it('reports every mismatched package', () => {

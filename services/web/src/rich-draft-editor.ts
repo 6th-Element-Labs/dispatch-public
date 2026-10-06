@@ -6,6 +6,9 @@ const converter = new TurndownService({ headingStyle: 'atx', bulletListMarker: '
 converter.keep(['u', 'table', 'sub', 'sup'])
 converter.addRule('strike', { filter: node => ['S', 'STRIKE', 'DEL'].includes(node.nodeName), replacement: content => `~~${content}~~` })
 converter.addRule('lineBreak', { filter: 'br', replacement: () => '\n' })
+// Turndown escapes underscores in plain URL text; GFM then treats those
+// backslashes as URL bytes. Keep URL targets stable across rich-editor edits.
+const draftUrls = (source: string) => source.replace(/https?:\/\/[^\s<>]+/g, url => url.replace(/\\+_/g, '_'))
 converter.addRule('emailImage', {
   filter: node => node.nodeName === 'SPAN' && node.hasAttribute('data-draft-image'),
   replacement: (_content, node) => {
@@ -48,7 +51,7 @@ export function draftEditorHtml(html: string): string {
 }
 
 export function draftEditorMarkdown(html: string): string {
-  return converter.turndown(draftEditorHtml(html))
+  return draftUrls(converter.turndown(draftEditorHtml(html)))
 }
 
 export interface RichDraftEditor extends HTMLDivElement { value: string; disabled: boolean }
@@ -69,8 +72,8 @@ export function installRichDraftEditor(root: HTMLElement): RichDraftEditor {
         return source
       },
       set: (value: string) => {
-        source = value
-        editor.innerHTML = draftEditorHtml(marked.parse(value, { async: false, gfm: true, breaks: true }) as string)
+        source = draftUrls(value)
+        editor.innerHTML = draftEditorHtml(marked.parse(source, { async: false, gfm: true, breaks: true }) as string)
         // Reply templates begin with space for the user's answer above the quoted message.
         // Markdown omits these empty paragraphs; the rich editor must retain that insertion point.
         if (/^\s*\n/.test(value)) {

@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { renderDraftMarkdown } from '../src/draft-markdown.js'
+import { normalizedDraftBody, renderDraftMarkdown } from '../src/draft-markdown.js'
 
 describe('renderDraftMarkdown', () => {
+  it('repairs prior URL underscore escapes without changing surrounding Markdown', () => {
+    const url = 'https://example.com/slides?slide=deck_0_829#slide=deck_0_829'
+    const escaped = url.replaceAll('_', '\\_')
+    expect(renderDraftMarkdown(`**Slides**\n\n${escaped}`)).toContain(`href="${url}"`)
+    expect(normalizedDraftBody(`**Slides**\n\n${escaped}`)).toBe(normalizedDraftBody(`**Slides**\n\n${url}`))
+    expect(renderDraftMarkdown('literal \\_word\\_')).not.toContain('<em>')
+  })
   it('renders GFM bold, lists, links, and quotes', () => {
     const html = renderDraftMarkdown('**Hi**\n\n- one\n\n[docs](https://example.com)\n\n> quoted')
     expect(html).toContain('<strong>Hi</strong>')

@@ -700,3 +700,23 @@ it('reads a sent draft outcome through the mail owner without sending or fetchin
   expect(lookup).toHaveBeenCalledWith('one', 'queued-alias')
   expect(send).not.toHaveBeenCalled()
 })
+it('validates complete recovery snapshots before comparing with Sent', async () => {
+  const compare = vi.fn(async () => true)
+  const base = await start({}, { sentDraftMatches: compare })
+  const send = (snapshot: object) => fetch(base + '/v1/drafts/queued-alias/send-status?account=one', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(snapshot) })
+  expect((await send({ bodyMarkdown: 'Incomplete' })).status).toBe(400)
+  expect(compare).not.toHaveBeenCalled()
+  const fields = { to: 'test@example.com', cc: '', bcc: '', subject: 'Reply', bodyMarkdown: 'Full reply', attachments: [] }
+  expect(await (await send(fields)).json()).toEqual({ matches: true })
+  expect(compare).toHaveBeenCalledWith('one', 'queued-alias', fields)
+})
+it('never reports later edits delivered using a previous successful send receipt', async () => {
+  const receipt = { id: 'sent', accountId: 'one', accountLabel: 'Test', draftId: 'draft', requestedAt: '2026-10-06T00:00:00Z', status: 'verified' as const, detailsSource: 'sent-message' as const, messageId: 'message' }
+  const compare = vi.fn(async (_account, _id, fields) => fields.bodyMarkdown === 'Actually sent')
+  const enqueue = vi.fn()
+  const base = await start({}, { existingDraftSend: () => receipt, sentDraftMatches: compare, enqueueDraftSave: enqueue, beginGmailDraftSend: vi.fn() })
+  const submit = (bodyMarkdown: string) => fetch(base + '/v1/draft-sends', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ accountId: 'one', draftId: 'draft', to: 'test@example.com', cc: '', bcc: '', subject: 'Reply', bodyMarkdown, attachments: [] }) })
+  expect((await submit('New unsent edits')).status).toBe(409)
+  expect(await (await submit('Actually sent')).json()).toEqual({ receipt })
+  expect(enqueue).not.toHaveBeenCalled()
+})

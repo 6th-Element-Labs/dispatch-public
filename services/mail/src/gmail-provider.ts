@@ -5,6 +5,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { ResumeClock } from './resume-clock.js'
 import { groupConversations, projectConversation, conversationForMailbox } from './conversation.js'
 import { plainBodyFromMessage, projectDraft } from './draft.js'
+import { normalizedDraftBody } from './draft-markdown.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { resolveAttachmentBytes } from './open-attachment.js'
@@ -1554,6 +1555,7 @@ export class GmailConnectorProvider {
 
   enqueueDraftSave(accountId: string, messageId: string, fields: DraftSaveFields, draftId?: string, clientDraftId?: string, seedOverride?: DraftProjection): DraftProjection {
     if (!accountId || !Object.keys(fields).length) throw new Error('Account and draft fields are required')
+    if (['accepted', 'verified'].includes(this.existingDraftSend(accountId, draftId, clientDraftId)?.status ?? '')) throw Object.assign(new Error('This draft was already sent. Your later edits are kept on this device.'), { code: 'gmail_draft_sent' })
     const identity = draftId ?? (clientDraftId ? `queued-${clientDraftId}` : '')
     if (identity && [identity, this.#draftQueue.pendingRemote(accountId, identity)?.id, this.#draftQueue.origin(accountId, identity)].some(id => id && this.#sendFlights.has(`${accountId}:${id}`))) throw new Error('This message is already sending. Its submitted contents cannot be changed.')
     const accounts = this.cachedAccounts()
@@ -1778,6 +1780,27 @@ export class GmailConnectorProvider {
 
   sendReceipts(): SendReceipt[] { return this.#local.receipts() }
   sendReceipt(id: string): SendReceipt | undefined { return this.#local.receipt(id) }
+
+  /** Recovery is consumed only when the complete editor matches the actual Sent copy. */
+  async sentDraftMatches(accountId: string, draftId: string, fields: Required<DraftSaveFields>): Promise<boolean> {
+    const receipt = this.existingDraftSend(accountId, draftId)
+    if (!receipt?.messageId || !['accepted', 'verified'].includes(receipt.status)) return false
+    const sent = await this.readMessage(accountId, receipt.messageId)
+    if (!sent.labels?.includes('SENT')) return false
+    const addresses = (value: string) => addressList(value).map(item => item.address.toLowerCase()).sort().join(',')
+    for (const key of ['to', 'cc', 'bcc'] as const) if (addresses(fields[key]) !== addresses((sent[key] ?? []).map(item => item.address).join(', '))) return false
+    if (fields.subject !== sent.subject || normalizedDraftBody(fields.bodyMarkdown) !== normalizedDraftBody(plainBodyFromMessage(sent))) return false
+    if (fields.attachments.length !== sent.attachments.length) return false
+    const expected = await this.#resolveDraftAttachments(accountId, fields.attachments)
+    const actual = await this.#resolveDraftAttachments(accountId, sent.attachments.map(file => ({ ...file, sourceMessageId: sent.id })))
+    const remaining = [...actual]
+    for (const file of expected) {
+      const index = remaining.findIndex(candidate => fileMatches(file, candidate) && file.contentId === candidate.contentId)
+      if (index < 0) return false
+      remaining.splice(index, 1)
+    }
+    return true
+  }
 
   async verifySendReceipt(id: string): Promise<SendReceipt> {
     const receipt = this.#local.receipt(id)

@@ -199,6 +199,11 @@ export const api = {
   async sentDraftStatus(id: string, accountId: string): Promise<SendReceipt | undefined> {
     return (await request<{ receipt: SendReceipt | null }>(`${MAIL}/v1/drafts/${encodeURIComponent(id)}/send-status?account=${encodeURIComponent(accountId)}`)).receipt ?? undefined
   },
+  async sentDraftMatches(id: string, accountId: string, fields: Record<string, unknown>): Promise<boolean> {
+    return (await request<{ matches: boolean }>(`${MAIL}/v1/drafts/${encodeURIComponent(id)}/send-status?account=${encodeURIComponent(accountId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(durableDraftFields(fields)),
+    })).matches
+  },
   async sendDraft(id: string, accountId: string): Promise<SendReceipt | undefined> {
     const result = await request<{ receipt?: SendReceipt }>(`${MAIL}/v1/drafts/${encodeURIComponent(id)}?action=send&account=${encodeURIComponent(accountId)}`, { method: 'POST' })
     return result.receipt
