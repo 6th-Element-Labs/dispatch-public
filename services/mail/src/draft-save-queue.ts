@@ -136,6 +136,8 @@ export class DraftSaveQueue {
   static readonly accountWorkerLimit = 4
   #workers = new Map<string, Promise<void>>()
   #resolvingAccounts = new Set<string>()
+  #priorityDrafts = new Map<string, Set<string>>()
+  #flushWaiters = new Set<() => void>()
   #stopped = false
   #paused = false
   #workerRetryAt = new Map<string, number>()
@@ -144,16 +146,19 @@ export class DraftSaveQueue {
   get active(): boolean { return this.#workers.size > 0 }
   stop(): void {
     this.#stopped = true
+    this.#wakeFlushes()
     for (const timer of this.#workerRetryTimers.values()) clearTimeout(timer)
     this.#workerRetryTimers.clear()
   }
   pause(value: boolean): void {
     this.#paused = value
+    this.#wakeFlushes()
     if (!value) this.#kick()
   }
   /** Pause new claims and wait for every already claimed provider operation to finish. */
   async drain(): Promise<void> {
     this.#paused = true
+    this.#wakeFlushes()
     await this.#waitForWorkers()
   }
   owns(accountId: string, id: string): boolean { return Boolean(this.store.draftSave(accountId, id)) }
@@ -266,7 +271,7 @@ export class DraftSaveQueue {
       attempts: conflictedPrior ? prior?.attempts ?? 0 : 0, reconnect: conflictedPrior ? prior?.reconnect ?? false : false,
       error: conflictedPrior ? prior?.error : undefined, createdAt: prior?.createdAt ?? new Date(this.now()).toISOString(), started: prior?.started,
       attachmentAppends, conflictRemote, conflictFields })
-    this.changed()
+    this.#changed()
     this.#kick()
     return this.projection(this.store.draftSave(accountId, id)!)
   }
@@ -310,7 +315,7 @@ export class DraftSaveQueue {
       error: conflictedPrior ? prior?.error : undefined,
       createdAt: prior?.createdAt ?? new Date(this.now()).toISOString(), started: prior?.started, attachmentAppends: appends,
       conflictRemote, conflictFields })
-    this.changed()
+    this.#changed()
     this.#kick()
     return this.projection(this.store.draftSave(accountId, id)!)
   }
@@ -333,7 +338,7 @@ export class DraftSaveQueue {
         this.store.putDraftSave({ ...latest, remoteId: fresh.id,
           ...(latest.state === 'saved' && latest.revision === job.revision ? { draft: { ...fresh, id } } : {}),
           base: latest.base ? { ...latest.base, id: fresh.id } : undefined })
-        this.changed()
+        this.#changed()
       }
     }
     return { ...fresh, resolvedFromDraftId: id, draftRevision: job.revision }
@@ -343,7 +348,7 @@ export class DraftSaveQueue {
     if (!job) throw new Error('Queued draft was not found')
     const noProviderWork = !job.started && !job.remoteId
     this.store.putDraftSave({ ...job, state: 'cancelled', retryAt: 0, cleanupDone: noProviderWork || job.cleanupDone })
-    this.changed()
+    this.#changed()
     // Cancellation is durable immediately; exact provider cleanup runs in the worker.
     this.#kick()
   }
@@ -379,7 +384,7 @@ export class DraftSaveQueue {
           draft: withConflict(afterRead.draft, remote, refreshedFields), revision: revision + 1, state: 'failed' as const,
           retryAt: 0, error: 'Gmail draft changed after the conflict preview. Read the latest version and choose again.' }
         this.store.putDraftSave(refreshed)
-        this.changed()
+        this.#changed()
         throw Object.assign(new Error('Gmail draft changed after the conflict preview. Read the latest version and choose again.'), { code: 'draft_revision_changed' })
       }
 
@@ -395,7 +400,7 @@ export class DraftSaveQueue {
           conflictRemote: undefined, conflictFields: undefined, revision: nextRevision,
           state: 'pending' as const, retryAt: 0, attempts: 0, reconnect: false, error: undefined }
         this.store.putDraftSave(resolved)
-        this.changed()
+        this.#changed()
         return this.projection(resolved)
       }
 
@@ -405,7 +410,7 @@ export class DraftSaveQueue {
         conflictRemote: undefined, conflictFields: undefined, revision: nextRevision, state: 'saved' as const,
         retryAt: 0, attempts: 0, reconnect: false, error: undefined }
       this.store.putDraftSave(resolved)
-      this.changed()
+      this.#changed()
       return { ...remote, resolvedFromDraftId: id, draftRevision: nextRevision }
     } finally {
       this.#resolvingAccounts.delete(accountId)
@@ -437,6 +442,32 @@ export class DraftSaveQueue {
       if (!workers.length) return
       await Promise.race(workers.map(worker => worker.then(() => undefined, () => undefined)))
     }
+  }
+  /** Send waits for its own confirmed revision, not every draft in the account. */
+  async flushDraft(accountId: string, draftId: string): Promise<void> {
+    const id = this.store.draftSave(accountId, draftId)?.id ?? this.pendingRemote(accountId, draftId)?.id
+    if (!id) return
+    const priority = this.#priorityDrafts.get(accountId) ?? new Set<string>()
+    priority.add(id)
+    this.#priorityDrafts.set(accountId, priority)
+    try {
+      while (!this.#stopped && !this.#paused) {
+        const job = this.store.draftSave(accountId, id)
+        if (!job || job.state !== 'pending' || !this.#hasRunnable(job)) return
+        await new Promise<void>(resolve => {
+          const wake = () => { this.#flushWaiters.delete(wake); resolve() }
+          this.#flushWaiters.add(wake)
+          this.#scheduleWorkers(accountId)
+        })
+      }
+    } finally {
+      priority.delete(id)
+      if (!priority.size) this.#priorityDrafts.delete(accountId)
+    }
+  }
+  #wakeFlushes(): void { for (const wake of [...this.#flushWaiters]) wake() }
+  #changed(): void {
+    try { this.changed() } finally { this.#wakeFlushes() }
   }
   #kick(): void {
     setImmediate(() => { void this.flush().catch(error => console.error('Dispatch draft queue could not schedule durable work:', error)) })
@@ -479,6 +510,7 @@ export class DraftSaveQueue {
       }).finally(() => {
         this.#workers.delete(accountId)
         this.#scheduleWorkers()
+        this.#wakeFlushes()
       })
       this.#clearWorkerFailure(accountId)
       this.#workers.set(accountId, worker)
@@ -493,7 +525,9 @@ export class DraftSaveQueue {
   }
   async #runAccount(accountId: string): Promise<void> {
     while (!this.#stopped && !this.#paused) {
-      const job = this.store.draftSaves().find(item => item.accountId === accountId && this.#hasRunnable(item))
+      const runnable = this.store.draftSaves().filter(item => item.accountId === accountId && this.#hasRunnable(item))
+      const priority = this.#priorityDrafts.get(accountId)
+      const job = runnable.find(item => priority?.has(item.id)) ?? runnable[0]
       if (!job) return
       if (job.state === 'cancelled') {
         if (!await this.#cleanupCancelled(accountId, job.id)) return
@@ -507,7 +541,7 @@ export class DraftSaveQueue {
     if (!latest || latest.state !== 'cancelled' || latest.cleanupDone) return true
     if (!latest.started && !latest.remoteId) {
       this.store.putDraftSave({ ...latest, cleanupDone: true })
-      this.changed()
+      this.#changed()
       return true
     }
     try {
@@ -527,7 +561,7 @@ export class DraftSaveQueue {
       latest = this.store.draftSave(accountId, draftId)
       if (!latest || latest.state !== 'cancelled') return true
       this.store.putDraftSave({ ...latest, remoteId, cleanupDone: true, retryAt: 0 })
-      this.changed()
+      this.#changed()
       return true
     } catch {
       if (!this.#stopped) {
@@ -593,7 +627,7 @@ export class DraftSaveQueue {
         gmailThreadId: confirmed.gmailThreadId ?? latest.draft.gmailThreadId, gmailMessageId: confirmed.gmailMessageId ?? latest.draft.gmailMessageId } : confirmed, latest.conflictRemote, latest.conflictFields), attachmentAppends,
         state: newerRevision || stillPendingAppends ? 'pending' : 'saved', retryAt: newerRevision || stillPendingAppends ? 0 : latest.retryAt,
         reconnect: false, error: undefined })
-      this.changed()
+      this.#changed()
     } catch (error) {
       if (this.#stopped) return
       latest = this.store.draftSave(accountId, draftId)
@@ -616,7 +650,7 @@ export class DraftSaveQueue {
         draft: withConflict(latest.draft, conflictRemote, conflictFields), conflictRemote, conflictFields,
         error: conflict ? detail : reconnect ? 'Sign in again to sync this draft.' : invalid ? detail : 'Draft is saved on this device. Waiting for Gmail.',
         retryAt: invalid ? 0 : this.now() + Math.min(60_000, 3_000 * 2 ** Math.min(attempts - 1, 5)) })
-      this.changed()
+      this.#changed()
     }
   }
   #verify(job: DraftSaveJob, saved: DraftProjection, confirmed: DraftProjection): void {

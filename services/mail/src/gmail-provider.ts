@@ -1265,6 +1265,31 @@ export class GmailConnectorProvider {
     }
   }
 
+  /** A complete saved copy can open immediately; callers revalidate it online. */
+  async openConversation(accountId: string, threadId: string, mailbox: GmailMailbox = 'inbox'): Promise<ConversationProjection> {
+    const cached = this.#local.conversation(accountId, threadId)
+    const indexed = this.#index?.threadMessages(accountId, threadId) ?? []
+    const knownAccount = this.#index?.accounts().some(account => account.id === accountId)
+    if (!this.#inventoryError && knownAccount && cached?.conversation.completeness?.complete
+      && indexed.length && indexed.every(message => cached.conversation.messages.some(saved => saved.id === message.id))) {
+      // Accepted folder/read actions in the index take precedence over old
+      // cached labels. Otherwise a locally trashed message could reappear.
+      const byId = new Map(indexed.map(message => [message.id, message]))
+      const messages = cached.conversation.messages.map(message => {
+        const current = byId.get(message.id)
+        if (!current) return message
+        const labels = (message.labels ?? []).filter(label => !['INBOX', 'SENT', 'DRAFT', 'SPAM', 'TRASH', 'UNREAD'].includes(label))
+        for (const [label, present] of [['INBOX', current.inInbox], ['SENT', current.inSent], ['DRAFT', current.inDrafts], ['SPAM', current.inSpam], ['TRASH', current.inTrash], ['UNREAD', current.unread]] as const) {
+          if (present) labels.push(label)
+        }
+        return { ...message, labels, unread: current.unread }
+      })
+      const conversation = { ...projectConversation(messages, 'gmail'), completeness: cached.conversation.completeness }
+      return { ...conversationForMailbox(conversation, mailbox), availability: { mode: 'cached', cachedAt: cached.cachedAt } }
+    }
+    return this.readConversation(accountId, threadId, false, mailbox)
+  }
+
   async readConversation(accountId: string, threadId: string, downloadedOnly = false, mailbox: GmailMailbox = 'inbox'): Promise<ConversationProjection> {
     const cached = this.#local.conversation(accountId, threadId)
     if (downloadedOnly) {
@@ -1561,7 +1586,7 @@ export class GmailConnectorProvider {
     if (seedOverride && seedOverride.accountId !== accountId) throw new Error('Draft baseline belongs to a different Gmail account')
     let seed = seedOverride ?? (draftId ? this.#drafts.get(`${accountId}:${draftId}`) ?? this.#local.draft(accountId, draftId) : undefined)
     if (!seed && messageId) {
-      const message = this.#index?.messages(accountId).find(message => message.id === messageId)
+      const message = this.#index?.message(accountId, messageId)
       if (message) seed = { ...projectDraft({ id: '', accountId, inReplyToMessageId: messageId, to: [], subject: '', bodyMarkdown: '' }), gmailThreadId: message.threadId }
     }
     return this.#draftQueue.enqueue(accountId, messageId, fields, draftId, seed, clientDraftId)
@@ -1915,7 +1940,7 @@ export class GmailConnectorProvider {
     let receipt: SendReceipt = initial ?? { id: randomUUID(), accountId, accountLabel: accountId, draftId, requestedAt: new Date().toISOString(), status: 'preparing', detailsSource: 'unavailable' }
     this.#local.putReceipt(receipt)
     try {
-      if (initial && (this.#draftQueue.owns(accountId, draftId) || this.#draftQueue.pendingRemote(accountId, draftId))) await this.#draftQueue.flushAccount(accountId)
+      if (initial && (this.#draftQueue.owns(accountId, draftId) || this.#draftQueue.pendingRemote(accountId, draftId))) await this.#draftQueue.flushDraft(accountId, draftId)
       // This exact revision was just read back and verified by the save worker.
       // Reuse that confirmation rather than fetching the same draft again before Send.
       const saved = expectedRevision === undefined ? undefined : this.#local.draftSave(accountId, draftId)

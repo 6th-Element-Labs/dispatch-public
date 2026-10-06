@@ -39,7 +39,7 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
 }
 
-type GmailProvider = Pick<GmailConnectorProvider, 'accounts' | 'listMessages' | 'listUnifiedMessages' | 'readMessage' | 'listConversations' | 'listUnifiedConversations' | 'readConversation'> & Partial<Pick<GmailConnectorProvider, 'workChanges' | 'readWorkConversation' | 'directSyncStatus' | 'connectDirectSync' | 'useConnectorSync' | 'startBackgroundSync' | 'stopBackgroundSync' | 'syncStatus' | 'syncNow' | 'refreshNow' | 'setConversationUnread' | 'searchConversations' | 'listMailboxConversations' | 'mailboxCounts' | 'listRecipients' | 'mutateConversation' | 'setRuntimeDraining' | 'enqueueDraftSave' | 'attachDraftFiles' | 'resolveDraftConflict' | 'conflictCopies' | 'createGmailDraft' | 'updateGmailDraft' | 'patchGmailDraft' | 'readGmailDraft' | 'openGmailDraft' | 'discardGmailDraft' | 'sendGmailDraft' | 'beginGmailDraftSend' | 'existingDraftSend' | 'sentDraftMatches' | 'backgroundSends' | 'failedSendDraft' | 'sendReceipts' | 'sendReceipt' | 'verifySendReceipt' | 'recordExternalSend' | 'cachedAccounts' | 'offlineStatus' | 'downloadedConversations' | 'startOfflineDownload' | 'cancelOfflineDownload' | 'readAttachment'>>
+type GmailProvider = Pick<GmailConnectorProvider, 'accounts' | 'listMessages' | 'listUnifiedMessages' | 'readMessage' | 'listConversations' | 'listUnifiedConversations' | 'readConversation'> & Partial<Pick<GmailConnectorProvider, 'openConversation' | 'workChanges' | 'readWorkConversation' | 'directSyncStatus' | 'connectDirectSync' | 'useConnectorSync' | 'startBackgroundSync' | 'stopBackgroundSync' | 'syncStatus' | 'syncNow' | 'refreshNow' | 'setConversationUnread' | 'searchConversations' | 'listMailboxConversations' | 'mailboxCounts' | 'listRecipients' | 'mutateConversation' | 'setRuntimeDraining' | 'enqueueDraftSave' | 'attachDraftFiles' | 'resolveDraftConflict' | 'conflictCopies' | 'createGmailDraft' | 'updateGmailDraft' | 'patchGmailDraft' | 'readGmailDraft' | 'openGmailDraft' | 'discardGmailDraft' | 'sendGmailDraft' | 'beginGmailDraftSend' | 'existingDraftSend' | 'sentDraftMatches' | 'backgroundSends' | 'failedSendDraft' | 'sendReceipts' | 'sendReceipt' | 'verifySendReceipt' | 'recordExternalSend' | 'cachedAccounts' | 'offlineStatus' | 'downloadedConversations' | 'startOfflineDownload' | 'cancelOfflineDownload' | 'readAttachment'>>
 
 function draftError(error: unknown, fallback: string): { error: string; detail: string } {
   const value = error as { code?: unknown; message?: unknown }
@@ -376,7 +376,12 @@ export function createMailServer(
       const accountId = url.searchParams.get('account')
       if (accountId) {
         try {
-          return writeJson(response, 200, { conversation: await gmail.readConversation(accountId, threadId, url.searchParams.get('offline') === 'true', mailbox) })
+          const offline = url.searchParams.get('offline') === 'true'
+          const preferCached = url.searchParams.get('preferCached') === 'true'
+          const conversation = !offline && preferCached && gmail.openConversation
+            ? await gmail.openConversation(accountId, threadId, mailbox)
+            : await gmail.readConversation(accountId, threadId, offline, mailbox)
+          return writeJson(response, 200, { conversation })
         } catch (error) {
           return writeJson(response, ['not_downloaded', 'conversation_not_in_mailbox'].includes((error as { code?: string }).code ?? '') ? 404 : 502, { error: (error as { code?: string }).code ?? 'gmail_conversation_read_failed', detail: error instanceof Error ? error.message : String(error) })
         }

@@ -564,6 +564,11 @@ const markReadDwell = createMarkReadDwell()
 let readStateActionSequence = 0
 let conversationLoadSequence = 0
 const conversationCache = new Map<string, Promise<ConversationProjection>>()
+const conversationRefreshes = new Map<string, {
+  request: Promise<ConversationProjection>
+  initial: Promise<ConversationProjection>
+  confirmed?: Promise<ConversationProjection>
+}>()
 const BINDING_CACHE = 'dispatch.codex.bindings.v1'
 let workPage: WorkPage | undefined
 let codexScopes: HTMLDivElement | undefined
@@ -1260,12 +1265,12 @@ async function openAttachment(message: MessageProjection, attachmentId: string, 
 async function selectConversation(id: string, options: { revealOnMobile?: boolean; startReadDwell?: boolean; refresh?: boolean } = {}): Promise<void> {
   if (workPage?.active) return
   const previousId = selectedConversationId
-  markReadDwell.cancel()
   const matchResult = searchView?.results.find(result => result.conversation.id === id)
   const summary = matchResult?.conversation ?? conversations.find((conversation) => conversation.id === id)
   if (!summary) return
   if (options.startReadDwell && previousId !== id) suppressReadDwell.delete(id)
   const preserveReader = Boolean(options.refresh && id === selectedConversationId && selected)
+  if (!preserveReader) markReadDwell.cancel()
   const preserveDraftEditor = Boolean(preserveReader && activeDraft)
   if (!preserveReader) {
     threadRefreshFailed = false
@@ -1373,13 +1378,20 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
   const key = conversationCacheKey(summary)
   let request = conversationCache.get(key)
   if (!request) {
-    request = api.readConversation(summary.threadId, summary.accountId ?? selectedAccountId, offlineMode, mailbox)
+    request = api.readConversation(summary.threadId, summary.accountId ?? selectedAccountId, offlineMode, mailbox, !options.refresh)
     conversationCache.set(key, request)
-    request.catch(() => conversationCache.delete(key))
+    request.catch(() => { if (conversationCache.get(key) === request) conversationCache.delete(key) })
   }
 
   try {
-    const conversation = await request
+    let conversation = await request
+    if (!offlineMode && conversation.source === 'gmail' && !conversation.messages.some(message => message.id === summary.latestMessageId)) {
+      const fresh = api.readConversation(summary.threadId, summary.accountId ?? selectedAccountId, false, mailbox)
+      if (conversationCache.get(key) === request) conversationCache.set(key, fresh)
+      fresh.catch(() => { if (conversationCache.get(key) === fresh) conversationCache.delete(key) })
+      conversation = await fresh
+      request = fresh
+    }
     if (sequence !== selectionSequence || selectedConversationId !== id) return
     // Cached bodies can have old labels. The current mailbox projection and
     // accepted commands own the row and toolbar's read state together.
@@ -1452,6 +1464,7 @@ async function selectConversation(id: string, options: { revealOnMobile?: boolea
     }
     renderRelatedWork()
     prefetchConversations(id)
+    if (!offlineMode && conversation.availability?.mode === 'cached') revalidateConversation(summary, key, request, conversation, sequence)
     if (keepCodex) return
     try {
       const key = conversationBindingKey({ accountId: conversation.accountId, threadId: conversation.threadId, source: conversation.source })
@@ -1523,8 +1536,53 @@ function dropConversationCache(conversationId: string): void {
     ?? conversations.find((conversation) => conversation.id === conversationId)?.threadId
   if (!threadId) return
   for (const key of conversationCache.keys()) {
-    if (key.endsWith(`:${threadId}`)) conversationCache.delete(key)
+    if (key.endsWith(`:${threadId}`)) {
+      conversationCache.delete(key)
+      conversationRefreshes.delete(key)
+    }
   }
+}
+
+// Refresh a saved copy without blocking navigation, resetting the scroll
+// position, or replacing edits made while Gmail was answering.
+function revalidateConversation(summary: ConversationSummary, key: string, initial: Promise<ConversationProjection>, cached: ConversationProjection, sequence: number): void {
+  let fresh = conversationRefreshes.get(key)
+  if (!fresh) {
+    fresh = { request: api.readConversation(summary.threadId, summary.accountId ?? selectedAccountId, false, mailbox), initial }
+    conversationRefreshes.set(key, fresh)
+  }
+  const refresh = fresh
+  void refresh.request.then(conversation => {
+    if (conversationRefreshes.get(key) !== refresh) return
+    if (conversationCache.get(key) === refresh.initial) {
+      refresh.confirmed = Promise.resolve(conversation)
+      conversationCache.set(key, refresh.confirmed)
+    } else if (!refresh.confirmed || conversationCache.get(key) !== refresh.confirmed) return
+    if (sequence !== selectionSequence || selectedConversationId !== summary.id || activeDraft || offlineMode) return
+    if (JSON.stringify(cached.messages) !== JSON.stringify(conversation.messages)
+      || JSON.stringify(cached.completeness) !== JSON.stringify(conversation.completeness)) {
+      void selectConversation(summary.id, { refresh: true })
+      return
+    }
+    // An unchanged online confirmation must not reload images, collapse an
+    // expanded message, reset scrolling, or restart the read dwell timer.
+    if (selected) selected = { ...selected, availability: conversation.availability }
+    readerNeedsRetry = conversation.availability?.mode === 'downloaded'
+    threadRefreshFailed = false
+    renderCopyChip(conversation.availability)
+    if (readerNeedsRetry) markReadDwell.cancel()
+  }).catch(error => {
+    if (conversationRefreshes.get(key) !== refresh || conversationCache.get(key) !== initial
+      || sequence !== selectionSequence || selectedConversationId !== summary.id || activeDraft || offlineMode) return
+    readerNeedsRetry = true
+    threadRefreshFailed = true
+    if (selected) selected = { ...selected, availability: { mode: 'downloaded', cachedAt: cached.availability?.cachedAt ?? '', reason: error instanceof Error ? error.message : String(error) } }
+    renderCopyChip(selected?.availability)
+    renderThreadCompleteness(selected)
+    markReadDwell.cancel()
+  }).finally(() => {
+    if (conversationRefreshes.get(key) === refresh) conversationRefreshes.delete(key)
+  })
 }
 
 function acceptedUnread(conversation: ConversationSummary): boolean | undefined {
@@ -1747,9 +1805,9 @@ function prefetchConversations(exceptId: string): void {
   for (const summary of (searchView?.results.map(result => result.conversation) ?? conversations).filter((item) => item.id !== exceptId).slice(0, 3)) {
     const key = conversationCacheKey(summary)
     if (!conversationCache.has(key)) {
-      const request = api.readConversation(summary.threadId, summary.accountId ?? selectedAccountId, offlineMode, mailbox)
+      const request = api.readConversation(summary.threadId, summary.accountId ?? selectedAccountId, offlineMode, mailbox, true)
       conversationCache.set(key, request)
-      request.catch(() => conversationCache.delete(key))
+      request.catch(() => { if (conversationCache.get(key) === request) conversationCache.delete(key) })
     }
   }
 }
@@ -4326,7 +4384,7 @@ function setDownloadedMode(value: boolean): void {
   if (draftDirty) checkpointDraft()
   offlineMode = value; localStorage.setItem('dispatch.offline-mode', String(value)); localStorage.setItem('dispatch.offline-mode-source', 'manual')
   if (!value) scheduleDraftSync(0)
-  clearSearchView(); conversationCache.clear(); renderOfflineStatus()
+  clearSearchView(); conversationCache.clear(); conversationRefreshes.clear(); renderOfflineStatus()
   void connectMail()
 }
 function persistSidebar(): void {

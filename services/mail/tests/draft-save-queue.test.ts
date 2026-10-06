@@ -782,3 +782,29 @@ it('pauses pending work during an idle runtime update and resumes without losing
   f.queue.pause(false); await f.queue.flush()
   expect((await f.queue.read('one', draft.id)).syncState).toBeUndefined()
 })
+
+
+it('prioritizes the draft being sent and releases it before unrelated saves finish', async () => {
+  const f = setup(); f.queue.pause(true)
+  let releaseOther!: () => void
+  const gate = new Promise<void>(resolve => { releaseOther = resolve })
+  const order: string[] = []
+  vi.mocked(f.gateway.create).mockImplementation(async job => {
+    order.push(job.fields.subject ?? '')
+    if (job.fields.subject === 'Other') await gate
+    const saved = projectDraft({ id: `gmail-${job.id}`, accountId: 'one', inReplyToMessageId: '',
+      to: [{ address: 'test@example.com', name: 'Test', initials: 'T' }], subject: job.fields.subject!, bodyMarkdown: job.fields.bodyMarkdown! })
+    f.setRemote(saved)
+    return saved
+  })
+  f.queue.enqueue('one', '', { to: 'test@example.com', subject: 'Other', bodyMarkdown: 'Unrelated' })
+  const target = f.queue.enqueue('one', '', { to: 'test@example.com', subject: 'Send', bodyMarkdown: 'Exact reply' })
+  f.queue.pause(false)
+  try {
+    await f.queue.flushDraft('one', target.id)
+    expect(order[0]).toBe('Send')
+    expect(f.store.draftSave('one', target.id)?.state).toBe('saved')
+    expect(f.queue.active).toBe(true)
+    expect(f.queue.pending().some(job => job.draft.subject === 'Other')).toBe(true)
+  } finally { releaseOther(); await f.queue.flush() }
+})

@@ -720,3 +720,18 @@ it('never reports later edits delivered using a previous successful send receipt
   expect(await (await submit('Actually sent')).json()).toEqual({ receipt })
   expect(enqueue).not.toHaveBeenCalled()
 })
+
+
+it('keeps authoritative and offline reads explicit while offering a cached opening route', async () => {
+  const read = vi.fn(async () => { throw new Error('authoritative read') })
+  const open = vi.fn(async () => { throw new Error('cached open') })
+  const base = await start({}, { readConversation: read, openConversation: open })
+  await fetch(base + '/v1/conversations/t1?account=one&preferCached=true&mailbox=spam')
+  expect(open).toHaveBeenCalledWith('one', 't1', 'spam')
+  expect(read).not.toHaveBeenCalled()
+  await fetch(base + '/v1/conversations/t1?account=one')
+  expect(read).toHaveBeenLastCalledWith('one', 't1', false, 'inbox')
+  await fetch(base + '/v1/conversations/t1?account=one&preferCached=true&offline=true')
+  expect(open).toHaveBeenCalledTimes(1)
+  expect(read).toHaveBeenLastCalledWith('one', 't1', true, 'inbox')
+})

@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "dispatch"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "libc",
  "objc2",

@@ -94,20 +94,30 @@ type MessageRow = {
   has_attachment: number
 }
 
-function queueEligible(message: IndexedGmailMessage, state: MailStateFilter): boolean {
-  if (!message.inInbox || message.inSpam || message.inTrash || message.inDrafts) return false
-  if (state === 'unread') return message.unread
-  if (state === 'read') return message.inInbox
-  return true
+// Filter before projecting rows. Read/unread conversation filtering still happens
+// after grouping, so a mixed thread cannot incorrectly appear in the Read tab.
+const MAILBOX_PREDICATES: Record<GmailMailbox, string> = {
+  inbox: 'in_inbox=1 AND in_spam=0 AND in_trash=0 AND in_drafts=0',
+  sent: 'in_sent=1 AND in_trash=0',
+  drafts: 'in_drafts=1 AND in_trash=0',
+  archive: 'in_archive=1 AND in_trash=0',
+  spam: 'in_spam=1 AND in_trash=0',
+  trash: 'in_trash=1',
 }
 
-function folderMember(message: IndexedGmailMessage, mailbox: Exclude<GmailMailbox, 'inbox'>): boolean {
-  if (mailbox !== 'trash' && message.inTrash) return false
-  if (mailbox === 'sent') return message.inSent
-  if (mailbox === 'drafts') return message.inDrafts
-  if (mailbox === 'archive') return message.inArchive
-  if (mailbox === 'spam') return message.inSpam
-  return message.inTrash
+function projectRow(row: MessageRow): IndexedGmailMessage {
+  return {
+    id: row.id, threadId: row.thread_id, accountId: row.account_id,
+    accountLabel: row.account_label,
+    sender: { name: row.sender_name, address: row.sender_address, initials: row.sender_initials },
+    subject: row.subject, receivedAt: row.received_at,
+    receivedLabel: row.received_label, receivedFullLabel: row.received_full_label,
+    preview: row.preview, unread: row.unread === 1,
+    inInbox: row.in_inbox === 1, inSent: row.in_sent === 1,
+    inDrafts: row.in_drafts === 1, inArchive: row.in_archive === 1,
+    inSpam: row.in_spam === 1, inTrash: row.in_trash === 1,
+    hasAttachment: row.has_attachment === 1,
+  }
 }
 
 function filterSearch(messages: readonly IndexedGmailMessage[], query: string): IndexedGmailMessage[] {
@@ -206,6 +216,11 @@ export class GmailIndex {
       if (!columns.some((column) => column.name === name)) {
         this.#db.exec(`ALTER TABLE gmail_messages ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`)
       }
+    }
+    // Run after legacy column migrations; partial indexes keep routine folder
+    // reads and badge counts independent of unrelated mailbox rows.
+    for (const [mailbox, predicate] of Object.entries(MAILBOX_PREDICATES)) {
+      this.#db.exec(`CREATE INDEX IF NOT EXISTS gmail_folder_${mailbox} ON gmail_messages(received_at DESC, account_id, thread_id) WHERE ${predicate}`)
     }
     // Source changes commit with mail rows, including direct history and local label actions.
     // Read/archive changes do not need another inference; source availability does.
@@ -544,26 +559,23 @@ export class GmailIndex {
     const rows = (accountId
       ? this.#db.prepare('SELECT * FROM gmail_messages WHERE account_id = ? ORDER BY received_at DESC').all(accountId)
       : this.#db.prepare('SELECT * FROM gmail_messages ORDER BY received_at DESC').all()) as unknown as MessageRow[]
-    return rows.map((row) => ({
-      id: row.id,
-      threadId: row.thread_id,
-      accountId: row.account_id,
-      accountLabel: row.account_label,
-      sender: { name: row.sender_name, address: row.sender_address, initials: row.sender_initials },
-      subject: row.subject,
-      receivedAt: row.received_at,
-      receivedLabel: row.received_label,
-      receivedFullLabel: row.received_full_label,
-      preview: row.preview,
-      unread: row.unread === 1,
-      inInbox: row.in_inbox === 1,
-      inSent: row.in_sent === 1,
-      inDrafts: row.in_drafts === 1,
-      inArchive: row.in_archive === 1,
-      inSpam: row.in_spam === 1,
-      inTrash: row.in_trash === 1,
-      hasAttachment: row.has_attachment === 1,
-    }))
+    return rows.map(projectRow)
+  }
+
+  #mailboxMessages(mailbox: GmailMailbox, state: MailStateFilter, accountId?: string): readonly IndexedGmailMessage[] {
+    const predicate = MAILBOX_PREDICATES[mailbox] + (mailbox === 'inbox' && state === 'unread' ? ' AND unread=1' : '')
+    const rows = this.#db.prepare(`SELECT * FROM gmail_messages WHERE ${predicate}${accountId ? ' AND account_id=?' : ''} ORDER BY received_at DESC`)
+      .all(...(accountId ? [accountId] : [])) as unknown as MessageRow[]
+    return rows.map(projectRow)
+  }
+
+  message(accountId: string, messageId: string): IndexedGmailMessage | undefined {
+    const row = this.#db.prepare('SELECT * FROM gmail_messages WHERE account_id=? AND id=?').get(accountId, messageId) as MessageRow | undefined
+    return row ? projectRow(row) : undefined
+  }
+
+  threadMessages(accountId: string, threadId: string): readonly IndexedGmailMessage[] {
+    return (this.#db.prepare('SELECT * FROM gmail_messages WHERE account_id=? AND thread_id=?').all(accountId, threadId) as unknown as MessageRow[]).map(projectRow)
   }
 
   /** The folders (not Unread) that hold any of these messages. */
@@ -742,46 +754,40 @@ export class GmailIndex {
   }
 
   conversations(state: MailStateFilter, accountId?: string): readonly ConversationSummary[] {
-    return groupConversations(this.messages(accountId).filter((message) => queueEligible(message, state)), state)
+    return this.mailboxConversations('inbox', state, accountId)
   }
 
   searchConversations(query: string, state: MailStateFilter, accountId?: string): readonly ConversationSummary[] {
-    return groupConversations(filterSearch(this.messages(accountId), query).filter((message) => queueEligible(message, state)), state)
+    return this.searchMailboxConversations('inbox', query, state, accountId)
   }
 
   mailboxConversations(mailbox: GmailMailbox, state: MailStateFilter, accountId?: string): readonly ConversationSummary[] {
-    if (mailbox === 'inbox') return this.conversations(state, accountId)
-    return groupConversations(this.messages(accountId).filter((message) => folderMember(message, mailbox)), state)
+    return groupConversations(this.#mailboxMessages(mailbox, state, accountId), state)
   }
 
   searchMailboxConversations(mailbox: GmailMailbox, query: string, state: MailStateFilter, accountId?: string): readonly ConversationSummary[] {
-    if (mailbox === 'inbox') return this.searchConversations(query, state, accountId)
-    return groupConversations(
-      filterSearch(this.messages(accountId), query).filter((message) => folderMember(message, mailbox)),
-      state,
-    )
+    return groupConversations(filterSearch(this.#mailboxMessages(mailbox, state, accountId), query), state)
   }
 
   searchDownloadedConversations(mailbox: GmailMailbox, query: string, state: MailStateFilter, bodyHits: ReadonlySet<string>, accountId?: string): readonly ConversationSummary[] {
     const terms = query.match(/(?:[^\s"]|"[^"]*")+/g) ?? []
     const filters = terms.filter(term => /^[^:]+:/.test(term)).join(' ')
     const freeText = terms.filter(term => !/^[^:]+:/.test(term)).join(' ')
-    const eligible = filterSearch(this.messages(accountId), filters).filter(message => mailbox === 'inbox' ? queueEligible(message, state) : folderMember(message, mailbox))
+    const eligible = filterSearch(this.#mailboxMessages(mailbox, state, accountId), filters)
     const metadataHits = new Set(filterSearch(eligible, freeText).map(message => `${message.accountId}:${message.id}`))
     return groupConversations(eligible.filter(message => !freeText || metadataHits.has(`${message.accountId}:${message.id}`) || bodyHits.has(`${message.accountId}:${message.id}`)), state)
   }
 
   mailboxCounts(accountId?: string): MailboxCounts {
-    const inbox = new Set<string>()
-    const drafts = new Set<string>()
-    const spam = new Set<string>()
-    for (const message of this.messages(accountId)) {
-      const key = `${message.accountId}:${message.threadId}`
-      if (queueEligible(message, 'unread')) inbox.add(key)
-      if (folderMember(message, 'drafts')) drafts.add(key)
-      if (folderMember(message, 'spam')) spam.add(key)
+    const countThreads = (mailbox: GmailMailbox, unread = false): number => {
+      const row = this.#db.prepare(`SELECT COUNT(*) AS count FROM (
+        SELECT account_id, thread_id FROM gmail_messages
+        WHERE ${MAILBOX_PREDICATES[mailbox]}${unread ? ' AND unread=1' : ''}${accountId ? ' AND account_id=?' : ''}
+        GROUP BY account_id, thread_id
+      )`).get(...(accountId ? [accountId] : [])) as { count: number }
+      return Number(row.count)
     }
-    return { inbox: inbox.size, drafts: drafts.size, spam: spam.size }
+    return { inbox: countThreads('inbox', true), drafts: countThreads('drafts'), spam: countThreads('spam') }
   }
 
   count(accountId?: string): number {

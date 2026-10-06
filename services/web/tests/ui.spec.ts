@@ -2365,7 +2365,7 @@ test('checks exact file identities and downloads thread attachments only on requ
   const downloads: string[] = []
   await page.route('http://127.0.0.1:8411/v1/accounts', route => route.fulfill({ json: { accounts: [{ id: 'one', email: 'work@example.com', name: 'Work', connectorId: 'gmail' }] } }))
   await page.route(/8411\/v1\/conversations\?/, route => route.fulfill({ json: { source: 'gmail', conversations: [summary], nextCursor: null, total: 1 } }))
-  await page.route('http://127.0.0.1:8411/v1/conversations/t1?account=one', route => route.fulfill({ json: { conversation: { ...summary, source: 'gmail', messages: [message] } } }))
+  await page.route(/8411\/v1\/conversations\/t1\?account=one(?:&|$)/, route => route.fulfill({ json: { conversation: { ...summary, source: 'gmail', messages: [message] } } }))
   await page.route(/8411\/v1\/messages\/m1\/attachments\/(empty-file|report-file)\/status\?/, async route => {
     statusRequests.push(route.request().url())
     const id = new URL(route.request().url()).pathname.split('/').at(-2)
@@ -4632,4 +4632,103 @@ test('imports call transcripts, retains inputs on failure, and opens timestamped
  const settings={enabled:true,hour:8,minute:0,days:90,accounts:[],importantContacts:[],importantTopics:[]},coverage={scope:'indexed',from:'2026-07-07T08:00:00Z',discovered:1,reviewed:1,pending:0,failed:0,ingestionAt:source.at,mailSyncAt:source.at,mailState:'ready',caughtUp:true,complete:true};const imports:Record<string,unknown>[]=[];let failed=true
  await page.route('http://127.0.0.1:8413/**',async route=>{const url=new URL(route.request().url());if(url.pathname==='/v1/work/transcripts'){imports.push(route.request().postDataJSON());if(failed){failed=false;return route.fulfill({status:503,json:{error:'temporarily_unavailable',detail:'Transcript import temporarily unavailable.'}})}return route.fulfill({status:202,json:{importId:'weekly'}})}if(url.pathname==='/v1/work/transcript')return route.fulfill({json:{input:{title:source.title,at:source.at},sources:[source]}});if(url.pathname.includes('/items/'))return route.fulfill({json:{item,history:[]}});return route.fulfill({json:{items:[item],decisions:[],updates:[],people:item.contacts,topics:[{id:item.topicId,name:item.topic,accountId:'demo'}],accounts:[{id:'demo',email:'steve@example.com'}],transcripts:[],settings,coverage,scan:{enabled:true,running:false,lastScan:source.at,error:null,failures:0,scanned:1,total:1,depth:30}}})})
  await page.goto('/');await page.locator('.dispatch-rail [data-work-nav="todos"]').click();await page.getByText('Import call transcript',{exact:true}).click();const form=page.locator('[data-work-import]');await form.locator('input[name=file]').setInputFiles({name:'weekly.vtt',mimeType:'text/vtt',buffer:Buffer.from('WEBVTT\n\n00:01:30.000 --> 00:01:35.000\n<v Jacob>I will send the scope.</v>')});await form.locator('input[name=at]').fill('2026-10-05T08:00');await form.locator('textarea[name=speakers]').fill('Jacob=jacob@example.com');await form.getByRole('button',{name:'Import transcript',exact:true}).click();await expect(page.getByRole('alert')).toContainText('temporarily unavailable');await expect(form.locator('input[name=title]')).toHaveValue('weekly');await form.getByRole('button',{name:'Import transcript',exact:true}).click();await expect.poll(()=>imports.length).toBe(2);expect(imports[1]).toMatchObject({format:'vtt',speakers:{Jacob:'jacob@example.com'},accountId:'demo'});await page.locator('[data-work=source]').click();await expect(page.getByRole('heading',{name:source.title})).toBeVisible();await expect(page.locator('[data-selected-transcript]')).toContainText('01:30');await page.waitForTimeout(5500);await expect(page.getByRole('heading',{name:source.title})).toBeVisible();await page.getByRole('button',{name:'Return to work'}).click();await expect(page.getByRole('heading',{name:item.title,exact:true})).toBeVisible()
+})
+
+
+async function cachedReaderFixture(page: Page) {
+  const rows = conversations.map(row => ({ ...row, id: `one:${row.threadId}`, accountId: 'one', unread: false }))
+  await page.route('http://127.0.0.1:8411/v1/accounts', route => route.fulfill({ json: { accounts: [{ id: 'one', name: 'Work', email: 'me@example.com' }] } }))
+  await page.route(/8411\/v1\/conversations\?/, route => route.fulfill({ json: { source: 'gmail', conversations: rows } }))
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let liveReads = 0
+  let changed = true
+  await page.route(/8411\/v1\/conversations\/[^/?]+(\?|$)/, async route => {
+    const url = new URL(route.request().url())
+    const row = rows.find(row => url.pathname.endsWith(row.threadId))!
+    const cached = url.searchParams.get('preferCached') === 'true'
+    if (!cached && row.threadId === 't1') { liveReads++; await gate }
+    const message = { ...messages.find(message => message.threadId === row.threadId)!, accountId: 'one', source: 'gmail', unread: false,
+      labels: ['INBOX'], body: { kind: 'plain-text', content: row.threadId === 't1' ? (!cached && changed ? 'Updated online body' : 'Saved body available immediately') : 'Second email body' }, attachments: [] }
+    const older = { ...message, id: 'm0', sender: { name: 'Earlier sender', address: 'earlier@example.com', initials: 'E' },
+      receivedAt: '2026-09-03T01:00:00Z', body: { kind: 'plain-text', content: 'Older saved message' } }
+    return route.fulfill({ json: { conversation: { ...row, source: 'gmail', messageCount: row.threadId === 't1' ? 2 : 1,
+      completeness: { complete: true, knownCount: row.threadId === 't1' ? 2 : 1, loadedCount: row.threadId === 't1' ? 2 : 1 },
+      availability: { mode: cached ? 'cached' : 'live', cachedAt: '2026-10-07T01:00:00Z' }, messages: row.threadId === 't1' ? [message, older] : [message] } } })
+  })
+  return { release, reads: () => liveReads, unchanged: () => { changed = false } }
+}
+
+test('saved emails open and accept Reply and Send while Gmail reads and delivery are blocked', async ({ page }) => {
+  const f = await cachedReaderFixture(page)
+  let releaseSend!: () => void
+  const sendGate = new Promise<void>(resolve => { releaseSend = resolve })
+  await page.route('http://127.0.0.1:8411/v1/draft-sends', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { sends: [] } })
+    expect(route.request().postDataJSON()).toMatchObject({ to: 'ana@example.com', bodyMarkdown: 'Newest typed reply' })
+    await sendGate
+    return route.fulfill({ status: 202, json: { receipt: { id: 'send', accountId: 'one', status: 'accepted', messageId: 'sent' } } })
+  })
+  try {
+    await page.goto('/')
+    await expect(page.getByText('Saved body available immediately', { exact: true })).toBeVisible()
+    await expect.poll(f.reads).toBe(1)
+    await page.getByRole('button', { name: 'Reply', exact: true }).click()
+    await page.locator('[data-draft-body]').fill('Newest typed reply')
+    const confirmed = page.waitForResponse(response => /conversations\/t1\?/.test(response.url()) && !response.url().includes('preferCached'))
+    f.release(); await confirmed
+    await expect(page.locator('[data-draft-body]')).toHaveText('Newest typed reply')
+    await page.locator('[data-send-draft]').click()
+    await expect(page.locator('[data-draft-body]')).toBeHidden()
+    await page.getByRole('button', { name: 'James Liu, Services agreement', exact: true }).click()
+    await expect(page.getByText('Second email body', { exact: true })).toBeVisible()
+  } finally { f.release(); releaseSend() }
+})
+
+test('an old email refresh cannot take over the newly selected email', async ({ page }) => {
+  const f = await cachedReaderFixture(page)
+  try {
+    await page.goto('/')
+    await expect(page.getByText('Saved body available immediately', { exact: true })).toBeVisible()
+    await expect.poll(f.reads).toBe(1)
+    await page.getByRole('button', { name: 'James Liu, Services agreement', exact: true }).click()
+    await expect(page.getByText('Second email body', { exact: true })).toBeVisible()
+    const confirmed = page.waitForResponse(response => /conversations\/t1\?/.test(response.url()) && !response.url().includes('preferCached'))
+    f.release(); await confirmed
+    await expect(page.getByText('Second email body', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Ana Morales, Opua berth confirmation', exact: true }).click()
+    await expect(page.getByText('Updated online body', { exact: true })).toBeVisible()
+    expect(f.reads()).toBe(1)
+  } finally { f.release() }
+})
+
+test('unchanged online confirmation preserves expanded messages', async ({ page }) => {
+  const f = await cachedReaderFixture(page); f.unchanged()
+  try {
+    await page.goto('/')
+    await expect(page.getByText('Saved body available immediately', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Expand message from Earlier sender', exact: true }).click()
+    await expect(page.getByText('Older saved message', { exact: true })).toBeVisible()
+    const confirmed = page.waitForResponse(response => /conversations\/t1\?/.test(response.url()) && !response.url().includes('preferCached'))
+    f.release(); await confirmed
+    await expect(page.getByText('Older saved message', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Expand message from Earlier sender', exact: true })).toHaveCount(0)
+  } finally { f.release() }
+})
+
+
+test('reselecting an email joins its existing refresh and still displays the fresh body', async ({ page }) => {
+  const f = await cachedReaderFixture(page)
+  try {
+    await page.goto('/')
+    await expect(page.getByText('Saved body available immediately', { exact: true })).toBeVisible()
+    await expect.poll(f.reads).toBe(1)
+    await page.getByRole('button', { name: 'James Liu, Services agreement', exact: true }).click()
+    await expect(page.getByText('Second email body', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Ana Morales, Opua berth confirmation', exact: true }).click()
+    await expect(page.getByText('Saved body available immediately', { exact: true })).toBeVisible()
+    f.release()
+    await expect(page.getByText('Updated online body', { exact: true })).toBeVisible()
+    expect(f.reads()).toBe(1)
+  } finally { f.release() }
 })

@@ -85,11 +85,12 @@ export const api = {
     if (search) params.set('q', search)
     return request(`${MAIL}/v1/conversations?${params}`)
   },
-  async readConversation(threadId: string, accountId?: string, offline = false, mailbox: GmailMailbox = 'inbox'): Promise<ConversationProjection> {
+  async readConversation(threadId: string, accountId?: string, offline = false, mailbox: GmailMailbox = 'inbox', preferCached = false): Promise<ConversationProjection> {
     const query = new URLSearchParams()
     if (accountId) query.set('account', accountId)
     if (offline) query.set('offline', 'true')
     if (mailbox !== 'inbox') query.set('mailbox', mailbox)
+    if (preferCached && !offline) query.set('preferCached', 'true')
     const result = await request<{ conversation: ConversationProjection }>(`${MAIL}/v1/conversations/${encodeURIComponent(threadId)}${query.size ? `?${query}` : ''}`)
     return result.conversation
   },

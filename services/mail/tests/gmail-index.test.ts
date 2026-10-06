@@ -414,3 +414,20 @@ it('seeds existing indexed threads on migration and pages them with a stable sav
  const db=new DatabaseSync(path);db.exec('DROP TRIGGER gmail_work_insert;DROP TRIGGER gmail_work_update;DROP TRIGGER gmail_work_delete;DROP TABLE gmail_work_events;');db.close();index=new GmailIndex(path);
  try {const first=index.workChanges(0,'2026-08-01T00:00:00Z',1),second=index.workChanges(first.cursor,'2026-08-01T00:00:00Z',1);expect(first.more).toBe(true);expect(first.events[0]?.threadId).toBe('thread-m1');expect(second.events[0]?.threadId).toBe('thread-m2');expect(second.more).toBe(false);expect(index.workChanges(second.cursor,'2026-08-01T00:00:00Z').events).toEqual([]);expect(()=>index.workChanges(second.cursor+100,'2026-08-01T00:00:00Z')).toThrow(/ahead/);}finally{index.close();}
 });
+
+
+it('keeps account, mixed read state, search and folder counts consistent after indexed filtering', () => {
+  const index = new GmailIndex(':memory:')
+  try {
+    index.replaceAccount('account-1', [message('m1', false, true, { threadId: 'mixed' }), message('m2', true, true, { threadId: 'mixed' }),
+      message('draft', false, false, { inDrafts: true }), message('spam', true, false, { inSpam: true }),
+      message('trashed-draft', false, false, { inDrafts: true, inTrash: true })], 'one', true)
+    index.replaceAccount('account-2', [message('other', false, true, { accountId: 'account-2', threadId: 'mixed' })], 'two', true)
+    expect(index.conversations('read', 'account-1')).toEqual([])
+    expect(index.conversations('read', 'account-2')).toHaveLength(1)
+    expect(index.conversations('all')).toHaveLength(2)
+    expect(index.searchConversations('from:ana is:unread', 'all')).toMatchObject([{ id: 'account-1:mixed' }])
+    expect(index.mailboxCounts()).toEqual({ inbox: 1, drafts: 1, spam: 1 })
+    expect(index.mailboxCounts('account-2')).toEqual({ inbox: 0, drafts: 0, spam: 0 })
+  } finally { index.close() }
+})

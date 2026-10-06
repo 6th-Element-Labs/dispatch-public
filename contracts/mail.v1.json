@@ -324,6 +324,31 @@
         }
       },
       "additionalProperties": false
+    },
+    "conversationAvailability": {
+      "type": "object",
+      "required": [
+        "mode",
+        "cachedAt"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "live",
+            "cached",
+            "downloaded"
+          ],
+          "description": "cached is a saved complete copy awaiting online revalidation; downloaded is offline or provider fallback."
+        },
+        "cachedAt": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { projectDraft } from '../src/draft.js'
+import { GmailIndex } from '../src/gmail-index.js'
 import { GmailConnectorProvider } from '../src/gmail-provider.js'
 import { LocalMailStore, type SendReceipt } from '../src/local-mail-store.js'
 
@@ -244,4 +245,48 @@ it('keeps raw downloaded bodies but applies folder visibility on every read', as
   expect((await restarted.readConversation('one', 't1', true, 'trash')).latestMessageId).toBe('discarded')
   expect((await restarted.readConversation('one', 't1', true, 'inbox')).latestMessageId).toBe('m1')
   expect(f.state.reads).toBe(1)
+})
+
+
+it('opens complete saved mail immediately while an authoritative read remains blocked', async () => {
+  const f = await fixture(); const p = f.open(); await p.syncNow()
+  await p.readConversation('one', 't1')
+  f.state.holdRead = true
+  const live = p.readConversation('one', 't1')
+  try {
+    await expect.poll(() => f.state.reads).toBe(2)
+    const saved = await p.openConversation('one', 't1')
+    expect(saved.availability?.mode).toBe('cached')
+    expect(saved.messages[0]?.body.content).toContain('Full saved body')
+    expect(f.state.reads).toBe(2)
+  } finally { f.state.releaseRead(); await live }
+})
+
+it('applies accepted folder and read state before opening an old saved copy', async () => {
+  const f = await fixture(); const p = f.open(); await p.syncNow()
+  await p.readConversation('one', 't1')
+  const index = new GmailIndex(f.path)
+  try {
+    index.setUnread('one', ['m1'], true)
+    index.applyConversationAction('one', ['m1'], 'trash')
+    const saved = await p.openConversation('one', 't1', 'trash')
+    expect(saved.messages[0]).toMatchObject({ unread: true, labels: ['TRASH', 'UNREAD'] })
+    await expect(p.openConversation('one', 't1')).rejects.toMatchObject({ code: 'conversation_not_in_mailbox' })
+    expect(f.state.reads).toBe(1)
+  } finally { index.close() }
+})
+
+it('reads Gmail instead of opening a saved copy missing a newly indexed message', async () => {
+  const f = await fixture(); const p = f.open(); await p.syncNow()
+  await p.readConversation('one', 't1')
+  const index = new GmailIndex(f.path)
+  try {
+    const first = index.message('one', 'm1')!
+    index.replaceAccount('one', [{ ...first, id: 'm2', receivedAt: '2026-09-05T01:00:00Z' }], 'new-delivery', false)
+    f.state.threadMessages = [message(), message('m2')]
+    const opened = await p.openConversation('one', 't1')
+    expect(opened.availability?.mode).toBe('live')
+    expect(opened.messages.map(message => message.id)).toContain('m2')
+    expect(f.state.reads).toBe(2)
+  } finally { index.close() }
 })

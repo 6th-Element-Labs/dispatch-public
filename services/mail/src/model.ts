@@ -103,7 +103,7 @@ export interface ConversationSummary {
 
 export interface ConversationProjection extends ConversationSummary {
   readonly completeness?: { readonly complete: boolean; readonly knownCount: number; readonly loadedCount: number; readonly reason?: string }
-  readonly availability?: { readonly mode: 'live' | 'downloaded'; readonly cachedAt: string; readonly reason?: string }
+  readonly availability?: { readonly mode: 'live' | 'cached' | 'downloaded'; readonly cachedAt: string; readonly reason?: string }
   readonly messages: readonly MessageProjection[]
   readonly source: 'demo' | 'gmail'
 }
